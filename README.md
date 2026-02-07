@@ -20,4 +20,15 @@ Copies included .desktop files into `~/.local/share/applications/`
 ## Installation
 
 ```bash
+#automatic:
 
+curl -fsSL "https://codeberg.org/el1lovescomputers/gitpkg/raw/branch/main/install.sh" | sh
+
+#or manual:
+cd ~/.cache/
+git clone codeberg.org/el1lovescomputers/gitpkg.git
+cd gitpkg
+cargo build --relase
+./target/release/gitpkg install el1lovescomputers/gitpkg --supplier "codeberg.org"
+
+```
