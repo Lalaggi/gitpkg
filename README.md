@@ -8,17 +8,22 @@ It allows you to clone repos, build them (if a supported language), and automati
 
 ---
 
-## Supported Languages
+# Supported Languages
 
 **Rust** - Requires `cargo` and `rustc`
+
 **C and C++** - Requires `gcc`, `build-essentials`, and a Makefile in the project root
+
 **Golang** - Requires `go` (recommended), `gc` or `gccgo`
+
 **Java and Kotlin** (work in progress) - Requires Gradle/Meson (depending on project setup)
+
 **npm packages** (work in progress) - Requires npm
+
 
 ---
 
-## Features
+# Features
 
 Automatically builds with multiple language support.
 Installs to `~/.local/share/gitpkg/(supplier_)user/repo/<latest commit hash>/`
@@ -28,13 +33,13 @@ Copies included .desktop files into `~/.local/share/applications/`
 
 ---
 
-## Installation
+# Installation
 
-# Automatic:
+## Automatic:
 ```bash
 curl -fsSL "https://codeberg.org/el1lovescomputers/gitpkg/raw/branch/main/install.sh" | sh
 ```
-# Manual:
+## Manual:
 ```bash
 cd ~/.cache/
 git clone codeberg.org/el1lovescomputers/gitpkg.git
@@ -46,31 +51,35 @@ cargo build --release
 
 ---
 
-## Usage
+# Usage
 
-# Install
+## Install
 Install (github): `gitpkg install <user>/<repo>`
 Install (Other. e.g. codeberg) `gitpkg install <user>/<repo> --supplier "codeberg.org"`
 
-# List
+## List
 List: `gitpkg list`
 
-# Upgrade
+## Upgrade
 Upgrade all: `gitpkg upgrade` or `gitpkg upgrade all`
 Upgrade specifc: `gitpkg upgrade <user>/<repo>`
 
-# Remove
+## Remove
 Remove: `gitpkg remove <user>/<repo>`
 
-# Clean
+## Clean
 Clean old versions - All: `gitpkg clean all`
 Clean old versions - Specific: `gitpkg clean <user>/<repo>`
 
-# In case of conflicts e.g. github: el1lovescomputers/gitpkg and codeberg: el1lovescomputers/gitpkg
+## In case of conflicts e.g. github: el1lovescomputers/gitpkg and codeberg: el1lovescomputers/gitpkg
+
 > Non github repos will automatically be installed as `<supplier>_<user>/<repo>`. e.g. codeberg_el1lovescomputers/gitpkg
+
 Use `--supplier`, or `<supplier>_<user>/<repo>` to specify the correct version.
+
 Without conflict, gitpkg will assume `<user>/<repo> = <supplier>_<user>/<repo>` when it can
 
 
-## License
+
+# License
 This Project uses the GNU GENERAL PUBLIC LICENSE - Version 3
