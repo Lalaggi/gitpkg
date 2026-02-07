@@ -35,11 +35,11 @@ Copies included .desktop files into `~/.local/share/applications/`
 
 # Installation
 
-## Automatic:
+### Automatic:
 ```bash
 curl -fsSL "https://codeberg.org/el1lovescomputers/gitpkg/raw/branch/main/install.sh" | sh
 ```
-## Manual:
+### Manual:
 ```bash
 cd ~/.cache/
 git clone codeberg.org/el1lovescomputers/gitpkg.git
@@ -53,36 +53,36 @@ cargo build --release
 
 # Usage
 
-## Install
+### Install
 
 Install (github): `gitpkg install <user>/<repo>`
 
 Install (Other. e.g. codeberg) `gitpkg install <user>/<repo> --supplier "codeberg.org"`
 
 
-## List
+### List
 
 List: `gitpkg list`
 
-## Upgrade
+### Upgrade
 Upgrade all: `gitpkg upgrade` or `gitpkg upgrade all`
 
 Upgrade specifc: `gitpkg upgrade <user>/<repo>`
 
 
-## Remove
+### Remove
 
 Remove: `gitpkg remove <user>/<repo>`
 
 
-## Clean
+### Clean
 
 Clean old versions - All: `gitpkg clean all`
 
 Clean old versions - Specific: `gitpkg clean <user>/<repo>`
 
 
-## In case of conflicts e.g. github: el1lovescomputers/gitpkg and codeberg: el1lovescomputers/gitpkg
+### In case of conflicts e.g. github: el1lovescomputers/gitpkg and codeberg: el1lovescomputers/gitpkg
 
 > Non github repos will automatically be installed as `<supplier>_<user>/<repo>`. e.g. codeberg_el1lovescomputers/gitpkg
 
