@@ -54,22 +54,33 @@ cargo build --release
 # Usage
 
 ## Install
+
 Install (github): `gitpkg install <user>/<repo>`
+
 Install (Other. e.g. codeberg) `gitpkg install <user>/<repo> --supplier "codeberg.org"`
 
+
 ## List
+
 List: `gitpkg list`
 
 ## Upgrade
 Upgrade all: `gitpkg upgrade` or `gitpkg upgrade all`
+
 Upgrade specifc: `gitpkg upgrade <user>/<repo>`
 
+
 ## Remove
+
 Remove: `gitpkg remove <user>/<repo>`
 
+
 ## Clean
+
 Clean old versions - All: `gitpkg clean all`
+
 Clean old versions - Specific: `gitpkg clean <user>/<repo>`
+
 
 ## In case of conflicts e.g. github: el1lovescomputers/gitpkg and codeberg: el1lovescomputers/gitpkg
 
