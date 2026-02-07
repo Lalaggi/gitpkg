@@ -25,6 +25,7 @@ Copies included .desktop files into `~/.local/share/applications/`
 curl -fsSL "https://codeberg.org/el1lovescomputers/gitpkg/raw/branch/main/install.sh" | sh
 
 #or manual:
+
 cd ~/.cache/
 git clone codeberg.org/el1lovescomputers/gitpkg.git
 cd gitpkg
