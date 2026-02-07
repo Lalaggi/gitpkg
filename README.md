@@ -29,7 +29,7 @@ curl -fsSL "https://codeberg.org/el1lovescomputers/gitpkg/raw/branch/main/instal
 cd ~/.cache/
 git clone codeberg.org/el1lovescomputers/gitpkg.git
 cd gitpkg
-cargo build --relase
+cargo build --release
 ./target/release/gitpkg install el1lovescomputers/gitpkg --supplier "codeberg.org"
 
 ```
