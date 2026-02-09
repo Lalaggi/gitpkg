@@ -85,7 +85,12 @@ fn main() {
             if args.len() < 3 || &args[2] == "all" {
                 upgrade_all(verbose);
             } else {
-                upgrade(&args[2], verbose, supplier.as_deref());
+                let target = if args[2] == "self" {
+                    "el1lovescomputers/gitpkg".to_string()
+                } else {
+                    args[2].clone()
+                };
+                upgrade(&target, verbose, supplier.as_deref());
             }
         }
         "update" => {
@@ -94,7 +99,12 @@ fn main() {
             if args.len() < 3 || &args[2] == "all" {
                 upgrade_all(verbose);
             } else {
-                upgrade(&args[2], verbose, supplier.as_deref());
+                let target = if args[2] == "self" {
+                    "el1lovescomputers/gitpkg".to_string()
+                } else {
+                    args[2].clone()
+                };
+                upgrade(&target, verbose, supplier.as_deref());
             }
         }
         _ => eprintln!("Unknown command: {}", command),
