@@ -44,7 +44,8 @@ fn main() {
                 eprintln!("Usage: gitpkg remove <user>/<repo>");
                 return;
             }
-            remove(&args[2]);
+            let target = resolve_self_alias(&args[2]);
+            remove(&target);
         }
         "goto" => {
             if args.len() < 3 {
@@ -52,13 +53,15 @@ fn main() {
                 return;
             }
             let spawn_shell = args.contains(&"--shell".to_string()) || args.contains(&"-s".to_string());
-            goto(&args[2], spawn_shell);
+            let target = resolve_self_alias(&args[2]);
+            goto(&target, spawn_shell);
         }
         "clean" => {
             if args.len() >= 3 && &args[2] == "all" {
                 clean_all();
             } else if args.len() >= 3 {
-                clean(&args[2]);
+                let target = resolve_self_alias(&args[2]);
+                clean(&target);
             } else {
                 clean_all();
             }
@@ -68,7 +71,8 @@ fn main() {
                 eprintln!("Usage: gitpkg versions <user>/<repo>");
                 return;
             }
-            versions(&args[2]);
+            let target = resolve_self_alias(&args[2]);
+            versions(&target);
         }
         "version" => {
             // Alias for versions
@@ -77,7 +81,8 @@ fn main() {
                 eprintln!("Usage: gitpkg version <user>/<repo>");
                 return;
             }
-            versions(&args[2]);
+            let target = resolve_self_alias(&args[2]);
+            versions(&target);
         }
         "list" => list(),
         "upgrade" => {
@@ -108,6 +113,15 @@ fn main() {
             }
         }
         _ => eprintln!("Unknown command: {}", command),
+    }
+}
+
+/// Resolve "self" alias to the author's repo key.
+fn resolve_self_alias(arg: &str) -> String {
+    if arg == "self" {
+        "el1lovescomputers/gitpkg".to_string()
+    } else {
+        arg.to_string()
     }
 }
 
