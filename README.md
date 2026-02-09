@@ -18,7 +18,7 @@ It allows you to clone repos, build them (if a supported language), and automati
 
 **Rust** - Requires `cargo` and `rustc`
 
-**C and C++** - Requires `gcc`, `build-essentials`, and a Makefile in the project root
+**C and C++** - Requires `gcc`, `build-essentials`,
 
 **Golang** - Requires `go` (recommended), `gc` or `gccgo`
 
