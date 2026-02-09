@@ -10,6 +10,12 @@ It allows you to clone repos, build them (if a supported language), and automati
 
 # Supported Languages
 
+**Anything with a Makefile** - Requires `make` - *should* work.
+
+**CMake** - Requires `cmake`
+
+**Meson** - Requires `ninja`
+
 **Rust** - Requires `cargo` and `rustc`
 
 **C and C++** - Requires `gcc`, `build-essentials`, and a Makefile in the project root
