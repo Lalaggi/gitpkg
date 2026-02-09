@@ -63,6 +63,22 @@ fn main() {
                 clean_all();
             }
         }
+        "versions" => {
+            if args.len() < 3 {
+                eprintln!("Usage: gitpkg versions <user>/<repo>");
+                return;
+            }
+            versions(&args[2]);
+        }
+        "version" => {
+            // Alias for versions
+            eprintln!("Warning: 'version' is an alias for 'versions'. It is recommended to use 'versions'.");
+            if args.len() < 3 {
+                eprintln!("Usage: gitpkg version <user>/<repo>");
+                return;
+            }
+            versions(&args[2]);
+        }
         "list" => list(),
         "upgrade" => {
             // Default to upgrading all when no target is provided
@@ -1108,6 +1124,36 @@ fn read_package_list() -> HashMap<String, String> {
     }
 
     packages
+}
+
+/// Return total size in bytes of a directory (recursive). Ignores errors per-file.
+fn dir_size_bytes(path: &Path) -> u64 {
+    let mut total: u64 = 0;
+    if path.is_file() {
+        if let Ok(meta) = fs::metadata(path) {
+            return meta.len();
+        }
+        return 0;
+    }
+
+    if let Ok(entries) = fs::read_dir(path) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                if let Ok(meta) = fs::metadata(&p) {
+                    total += meta.len();
+                }
+            } else if p.is_dir() {
+                total += dir_size_bytes(&p);
+            }
+        }
+    }
+    total
+}
+
+fn format_mb(bytes: u64) -> String {
+    let mb = (bytes as f64) / 1024.0 / 1024.0;
+    format!("{:.2} MB", mb)
 }
 
 fn add_to_package_list(user: &str, repo: &str, info_path: &str, supplier: &str) {
@@ -2248,17 +2294,21 @@ fn clean(package: &str) {
 
     if let Ok(entries) = fs::read_dir(&package_dir) {
         let mut removed_count = 0;
+        let mut freed_bytes: u64 = 0;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
                 let dir_name = entry.file_name().to_string_lossy().to_string();
                 // Skip if it's the current version or the info file
                 if dir_name != current_commit && dir_name != "info.gitpkg" {
-                    println!("Removing old version: {}", dir_name);
+                    // compute size before removal
+                    let size = dir_size_bytes(&path);
+                    println!("Removing old version: {} ({})", dir_name, format_mb(size));
                     match fs::remove_dir_all(&path) {
                         Ok(_) => {
                             removed_count += 1;
-                            println!("  Removed: {}", path.display());
+                            freed_bytes += size;
+                            println!("  Removed: {} (freed {})", path.display(), format_mb(size));
                         }
                         Err(e) => eprintln!("  Failed to remove {}: {}", path.display(), e),
                     }
@@ -2267,7 +2317,7 @@ fn clean(package: &str) {
         }
 
         if removed_count > 0 {
-            println!("Removed {} old version(s)", removed_count);
+            println!("Removed {} old version(s), freed {}", removed_count, format_mb(freed_bytes));
         } else {
             println!("No old versions to clean");
         }
@@ -2345,6 +2395,22 @@ fn list() {
                     .get("has_data_files")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
+                // Compute package size: sum of version directories under package dir
+                let mut size_bytes: u64 = 0;
+                if let Some(info_parent) = Path::new(info_path).parent() {
+                    if let Ok(entries) = fs::read_dir(info_parent) {
+                        for entry in entries.flatten() {
+                            let p = entry.path();
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            if name == "info.gitpkg" {
+                                continue;
+                            }
+                            if p.is_dir() {
+                                size_bytes += dir_size_bytes(&p);
+                            }
+                        }
+                    }
+                }
 
                 println!("Package:    {}", package);
                 println!(
@@ -2356,6 +2422,7 @@ fn list() {
                 println!("  Supplier: {}", supplier);
                 println!("  Data:     {}", if has_data { "yes" } else { "no" });
                 println!("  Installed: {}", timestamp);
+                println!("  Size:      {}", format_mb(size_bytes));
                 println!();
             } else {
                 println!("Package:    {}", package);
@@ -2371,6 +2438,90 @@ fn list() {
 
     println!("{:-<60}", "");
     println!("Total: {} package(s)", packages.len());
+}
+
+fn versions(package: &str) {
+    // Use the same package selection logic as clean/upgrade
+    let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
+
+    let exact_match = find_package_by_key(package);
+
+    let (pkg_key, supplier, info_path) = if let Some(m) = exact_match {
+        m
+    } else {
+        let matches = find_matching_packages(&user, &repo);
+        if matches.is_empty() {
+            println!("Package {} is not installed", package);
+            return;
+        }
+        let selected = if let Some(ref sup) = supplier_hint {
+            matches.iter().position(|(_, s, _)| s == sup).unwrap_or(0)
+        } else if matches.len() > 1 {
+            match prompt_package_selection(&matches) {
+                Some(idx) => idx,
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+        matches[selected].clone()
+    };
+
+    // Read info to determine current version
+    let current_commit = if let Ok(content) = fs::read_to_string(&info_path) {
+        if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+            info.get("latest_commit")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let package_dir = Path::new(&env::var("HOME").unwrap())
+        .join(".local/share/gitpkg")
+        .join(&pkg_key);
+
+    println!("Versions for {} (supplier: {})", pkg_key, supplier);
+
+    if let Ok(entries) = fs::read_dir(&package_dir) {
+        let mut rows = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "info.gitpkg" {
+                continue;
+            }
+            if p.is_dir() {
+                let size = dir_size_bytes(&p);
+                let is_current = current_commit.as_deref() == Some(&name);
+                rows.push((name, size, is_current));
+            }
+        }
+
+        if rows.is_empty() {
+            println!("  (No versions found)");
+            return;
+        }
+
+        // Sort by name (hash) descending for readability
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+
+        for (name, size, is_current) in rows {
+            if is_current {
+                println!("* {}  {}  (current)", name, format_mb(size));
+            } else {
+                println!("  {}  {}", name, format_mb(size));
+            }
+        }
+    } else {
+        println!("No versions found for {}", pkg_key);
+    }
 }
 
 fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
