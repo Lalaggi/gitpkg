@@ -2131,9 +2131,7 @@ fn write_info(
 
     // Add to global package list
     add_to_package_list(user, repo, info_file.to_str().unwrap(), supplier);
-    // Also write per-version install timestamp file inside the install path so we can list versions chronologically
-    let install_ts_path = Path::new(install_path).join("install.timestamp");
-    let _ = fs::write(&install_ts_path, Utc::now().to_rfc3339());
+    // Note: we do not write per-version timestamps; versions are sorted by directory modification time.
 }
 
 fn remove(package: &str) {
@@ -2634,21 +2632,11 @@ fn versions(package: &str) {
                 let size = dir_size_bytes(&p);
                 let is_current = current_commit.as_deref() == Some(&name);
 
-                // Read per-version install timestamp if present
-                let ts_file = p.join("install.timestamp");
-                let install_dt = if ts_file.exists() {
-                    if let Ok(s) = fs::read_to_string(&ts_file) {
-                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s.trim()) {
-                            Some(parsed.with_timezone(&chrono::Utc))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+                // Use directory modification time as install datetime (may reflect install or filesystem mtime)
+                let install_dt = fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|st| chrono::DateTime::<chrono::Utc>::from(st));
 
                 rows.push((name, size, is_current, install_dt));
             }
@@ -2666,6 +2654,12 @@ fn versions(package: &str) {
             (None, Some(_)) => std::cmp::Ordering::Greater,
             (None, None) => a.0.cmp(&b.0),
         });
+
+        // Ensure current version is always shown at the bottom
+        if let Some(pos) = rows.iter().position(|r| r.2) {
+            let cur = rows.remove(pos);
+            rows.push(cur);
+        }
 
         for (name, size, is_current, install_dt) in rows {
             let dt_str = install_dt
