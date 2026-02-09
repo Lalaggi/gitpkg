@@ -2131,6 +2131,9 @@ fn write_info(
 
     // Add to global package list
     add_to_package_list(user, repo, info_file.to_str().unwrap(), supplier);
+    // Also write per-version install timestamp file inside the install path so we can list versions chronologically
+    let install_ts_path = Path::new(install_path).join("install.timestamp");
+    let _ = fs::write(&install_ts_path, Utc::now().to_rfc3339());
 }
 
 fn remove(package: &str) {
@@ -2619,7 +2622,8 @@ fn versions(package: &str) {
     println!("Versions for {} (supplier: {})", pkg_key, supplier);
 
     if let Ok(entries) = fs::read_dir(&package_dir) {
-        let mut rows = Vec::new();
+        // rows: (name, size, is_current, Option<install_datetime>)
+        let mut rows: Vec<(String, u64, bool, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
         for entry in entries.flatten() {
             let p = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
@@ -2629,7 +2633,24 @@ fn versions(package: &str) {
             if p.is_dir() {
                 let size = dir_size_bytes(&p);
                 let is_current = current_commit.as_deref() == Some(&name);
-                rows.push((name, size, is_current));
+
+                // Read per-version install timestamp if present
+                let ts_file = p.join("install.timestamp");
+                let install_dt = if ts_file.exists() {
+                    if let Ok(s) = fs::read_to_string(&ts_file) {
+                        if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(s.trim()) {
+                            Some(parsed.with_timezone(&chrono::Utc))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                rows.push((name, size, is_current, install_dt));
             }
         }
 
@@ -2638,14 +2659,22 @@ fn versions(package: &str) {
             return;
         }
 
-        // Sort by name (hash) descending for readability
-        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        // Sort by install datetime ascending (oldest first). Unknown timestamps go last.
+        rows.sort_by(|a, b| match (&a.3, &b.3) {
+            (Some(x), Some(y)) => x.cmp(y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.0.cmp(&b.0),
+        });
 
-        for (name, size, is_current) in rows {
+        for (name, size, is_current, install_dt) in rows {
+            let dt_str = install_dt
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string());
             if is_current {
-                println!("* {}  {}  (current)", name, format_mb(size));
+                println!("* {}  {}  {}  (current)", name, format_mb(size), dt_str);
             } else {
-                println!("  {}  {}", name, format_mb(size));
+                println!("  {}  {}  {}", name, format_mb(size), dt_str);
             }
         }
     } else {

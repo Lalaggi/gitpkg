@@ -19,6 +19,7 @@ It allows you to clone repos, build them (if a supported language), and automati
 **Java and Kotlin** (work in progress) - Requires Gradle/Meson (depending on project setup)
 
 **npm packages** (work in progress) - Requires npm
+
 **Python (experimental)** - Supports projects with pyproject.toml; creates a venv and installs the package (experimental)
 
 
