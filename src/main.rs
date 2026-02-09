@@ -65,13 +65,17 @@ fn main() {
         }
         "list" => list(),
         "upgrade" => {
-            if args.len() < 3 {
-                eprintln!(
-                    "Usage: gitpkg upgrade <user>/<repo> or gitpkg upgrade all [--supplier <domain>]"
-                );
-                return;
+            // Default to upgrading all when no target is provided
+            if args.len() < 3 || &args[2] == "all" {
+                upgrade_all(verbose);
+            } else {
+                upgrade(&args[2], verbose, supplier.as_deref());
             }
-            if &args[2] == "all" {
+        }
+        "update" => {
+            // Alias for upgrade - show a warning recommending 'upgrade'
+            eprintln!("Warning: 'update' and 'upgrade' do the same thing. It is recommended to use 'upgrade'.");
+            if args.len() < 3 || &args[2] == "all" {
                 upgrade_all(verbose);
             } else {
                 upgrade(&args[2], verbose, supplier.as_deref());
@@ -453,6 +457,7 @@ fn prompt_executable_selection(executables: &[String]) -> Option<String> {
 }
 
 /// Find data files that need to be installed (gresources, schemas, icons, etc.)
+#[allow(dead_code)]
 fn find_data_files(source_dir: &Path) -> Vec<(PathBuf, String)> {
     let mut files = Vec::new();
 
@@ -1078,6 +1083,7 @@ fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<usiz
     None
 }
 
+#[allow(dead_code)]
 fn get_supplier_from_url(url: &str) -> Option<String> {
     // Extract domain from URL like "https://gitlab.com/user/repo.git "
     if let Some(start) = url.find("://") {
@@ -1088,7 +1094,6 @@ fn get_supplier_from_url(url: &str) -> Option<String> {
     }
     None
 }
-
 fn read_package_list() -> HashMap<String, String> {
     let list_path = list_file_path();
     let mut packages = HashMap::new();
@@ -1644,7 +1649,6 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
         }
 
         // Determine actual installed executable (prefer real filename over repo)
-        let bin_dir = Path::new(&install_path).join("bin");
         let exe_path = match find_installed_executable(Path::new(&install_path), repo) {
             Some(p) => p,
             None => Path::new(&install_path).join("bin").join(repo),
