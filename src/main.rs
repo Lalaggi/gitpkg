@@ -46,6 +46,14 @@ fn main() {
             }
             remove(&args[2]);
         }
+        "goto" => {
+            if args.len() < 3 {
+                eprintln!("Usage: gitpkg goto <user>/<repo> [--shell|-s]");
+                return;
+            }
+            let spawn_shell = args.contains(&"--shell".to_string()) || args.contains(&"-s".to_string());
+            goto(&args[2], spawn_shell);
+        }
         "clean" => {
             if args.len() >= 3 && &args[2] == "all" {
                 clean_all();
@@ -1652,32 +1660,68 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
 
         let symlink_path = Path::new("/usr/bin").join(&exe_name);
 
+        // Attempt to create system symlink safely (don't overwrite non-symlink files)
         let symlink_created = if sudo_auth.is_ok() && sudo_auth.unwrap().success() {
-            let _ = Command::new("sudo")
-                .arg("rm")
-                .arg("-f")
-                .arg(&symlink_path)
-                .status();
-
-            let status = Command::new("sudo")
-                .arg("ln")
-                .arg("-s")
-                .arg(&exe_path)
-                .arg(&symlink_path)
-                .status();
-
-            match status {
-                Ok(s) if s.success() => {
-                    println!(
-                        "Created symlink: {} -> {}",
-                        symlink_path.display(),
-                        exe_path.display()
-                    );
-                    true
+            // If path exists check if it's a symlink. If it's a regular file, do not overwrite.
+            match std::fs::symlink_metadata(&symlink_path) {
+                Ok(meta) => {
+                    if meta.file_type().is_symlink() {
+                        // remove existing symlink and create new one
+                        let _ = Command::new("sudo")
+                            .arg("rm")
+                            .arg("-f")
+                            .arg(&symlink_path)
+                            .status();
+                        let status = Command::new("sudo")
+                            .arg("ln")
+                            .arg("-s")
+                            .arg(&exe_path)
+                            .arg(&symlink_path)
+                            .status();
+                        match status {
+                            Ok(s) if s.success() => {
+                                println!(
+                                    "Replaced symlink: {} -> {}",
+                                    symlink_path.display(),
+                                    exe_path.display()
+                                );
+                                true
+                            }
+                            _ => {
+                                eprintln!("Failed to update symlink in /usr/bin");
+                                false
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "Refusing to overwrite existing non-symlink at {}. Remove it manually or use another installer.",
+                            symlink_path.display()
+                        );
+                        false
+                    }
                 }
-                _ => {
-                    eprintln!("Failed to create symlink in /usr/bin");
-                    false
+                Err(_) => {
+                    // Path does not exist; create symlink
+                    let status = Command::new("sudo")
+                        .arg("ln")
+                        .arg("-s")
+                        .arg(&exe_path)
+                        .arg(&symlink_path)
+                        .status();
+                    match status {
+                        Ok(s) if s.success() => {
+                            println!(
+                                "Created symlink: {} -> {}",
+                                symlink_path.display(),
+                                exe_path.display()
+                            );
+                            true
+                        }
+                        _ => {
+                            eprintln!("Failed to create symlink in /usr/bin");
+                            false
+                        }
+                    }
                 }
             }
         } else {
@@ -2047,6 +2091,77 @@ fn remove(package: &str) {
     remove_from_package_list(&pkg_key);
 
     println!("Successfully removed {}", pkg_key);
+}
+
+fn goto(package: &str, spawn_shell: bool) {
+    // Support supplier-prefixed keys and user/repo
+    let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
+
+    // Try exact key first
+    let exact_match = find_package_by_key(package);
+
+    let (pkg_key, _supplier, info_path) = if let Some(m) = exact_match {
+        m
+    } else {
+        let matches = find_matching_packages(&user, &repo);
+        if matches.is_empty() {
+            eprintln!("Package {} is not installed", package);
+            return;
+        }
+
+        let selected = if let Some(ref sup) = supplier_hint {
+            matches.iter().position(|(_, s, _)| s == sup).unwrap_or(0)
+        } else if matches.len() > 1 {
+            match prompt_package_selection(&matches) {
+                Some(idx) => idx,
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+
+        matches[selected].clone()
+    };
+
+    // Read info file
+    let info_content = match fs::read_to_string(&info_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to read info file: {}", e);
+            return;
+        }
+    };
+
+    let info: toml::Value = match toml::from_str(&info_content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to parse info file: {}", e);
+            return;
+        }
+    };
+
+    let install_path = match info.get("install_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            eprintln!("No install_path found for {}", pkg_key);
+            return;
+        }
+    };
+
+    if spawn_shell {
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        println!("Spawning shell {} at {}", shell, install_path);
+        let status = Command::new(shell).current_dir(install_path).status();
+        if let Err(e) = status {
+            eprintln!("Failed to spawn shell: {}", e);
+        }
+    } else {
+        // Print path to stdout so callers can cd into it: cd "$(gitpkg goto user/repo)"
+        println!("{}", install_path);
+    }
 }
 
 fn clean(package: &str) {
