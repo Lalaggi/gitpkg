@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     env,
     fs::{self},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
@@ -69,9 +69,53 @@ fn main() {
     }
 }
 
-fn parse_pkg(arg: &str) -> (&str, &str) {
+/// Parse package argument. Handles both simple "user/repo" and supplier-prefixed "supplier_user/repo"
+fn parse_pkg(arg: &str) -> (String, String) {
+    // Check if this is a supplier-prefixed package key (e.g., "codeberg_el1lovescomputers/gitpkg")
+    if let Some(underscore_pos) = arg.find('_') {
+        if let Some(slash_pos) = arg.find('/') {
+            if underscore_pos < slash_pos {
+                // This looks like "supplier_user/repo" format
+                // Extract just the user part after the supplier prefix
+                let user_part = &arg[underscore_pos + 1..slash_pos];
+                let repo_part = &arg[slash_pos + 1..];
+                return (user_part.to_string(), repo_part.to_string());
+            }
+        }
+    }
+    
+    // Standard "user/repo" format
     let mut parts = arg.split('/');
-    (parts.next().unwrap(), parts.next().unwrap())
+    let user = parts.next().unwrap_or("").to_string();
+    let repo = parts.next().unwrap_or("").to_string();
+    (user, repo)
+}
+
+/// Parse package with potential supplier info for clean command
+fn parse_pkg_with_supplier(arg: &str) -> (String, String, Option<String>) {
+    // Check if this is a supplier-prefixed package key
+    if let Some(underscore_pos) = arg.find('_') {
+        if let Some(slash_pos) = arg.find('/') {
+            if underscore_pos < slash_pos {
+                // Extract supplier and user
+                let supplier_part = &arg[..underscore_pos];
+                let user_part = &arg[underscore_pos + 1..slash_pos];
+                let repo_part = &arg[slash_pos + 1..];
+                
+                // Reconstruct supplier domain
+                let supplier_domain = if supplier_part.contains('.') {
+                    supplier_part.to_string()
+                } else {
+                    format!("{}.com", supplier_part)
+                };
+                
+                return (user_part.to_string(), repo_part.to_string(), Some(supplier_domain));
+            }
+        }
+    }
+    
+    let (user, repo) = parse_pkg(arg);
+    (user, repo, None)
 }
 
 fn temp_path(user: &str, repo: &str) -> String {
@@ -380,6 +424,179 @@ fn prompt_executable_selection(executables: &[String]) -> Option<String> {
     None
 }
 
+/// Find data files that need to be installed (gresources, schemas, icons, etc.)
+fn find_data_files(source_dir: &Path) -> Vec<(PathBuf, String)> {
+    let mut files = Vec::new();
+    
+    // GTK/GLib resource files
+    for entry in walkdir::WalkDir::new(source_dir) {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        
+        let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        
+        // Determine destination based on file type
+        let dest_dir = if filename.ends_with(".gresource") {
+            "share/{}"
+        } else if filename.ends_with(".gschema.xml") {
+            "share/glib-2.0/schemas"
+        } else if filename == "glib-2.0" && path.is_dir() {
+            continue; // Handle separately
+        } else if extension == "desktop" {
+            "share/applications"
+        } else if filename.contains(".icon") || extension == "png" || extension == "svg" {
+            if path.to_string_lossy().contains("icon") {
+                "share/icons/hicolor"
+            } else {
+                continue;
+            }
+        } else if extension == "service" {
+            "share/dbus-1/services"
+        } else if filename.ends_with(".metainfo.xml") || filename.ends_with(".appdata.xml") {
+            "share/metainfo"
+        } else {
+            continue;
+        };
+        
+        // Get relative path from source
+        let relative = path.strip_prefix(source_dir).unwrap_or(path);
+        files.push((path.to_path_buf(), dest_dir.to_string()));
+    }
+    
+    files
+}
+
+/// Copy data files to installation directory
+fn install_data_files(source_dir: &Path, install_path: &Path, repo: &str) -> Vec<(PathBuf, PathBuf)> {
+    let mut installed = Vec::new();
+    
+    // GTK4/GLib specific: look for data directories
+    let data_dirs = [
+        source_dir.join("data"),
+        source_dir.join("resources"),
+        source_dir.join("share"),
+        source_dir.join(repo),  // Some apps put resources in a subdir named after repo
+    ];
+    
+    for data_dir in &data_dirs {
+        if !data_dir.exists() {
+            continue;
+        }
+        
+        // Copy gresource files
+        for entry in fs::read_dir(data_dir).unwrap_or_default() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            
+            let path = entry.path();
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            
+            // Handle .gresource files
+            if filename.ends_with(".gresource") {
+                let dest_dir = install_path.join("share").join(repo);
+                fs::create_dir_all(&dest_dir).unwrap();
+                let dest = dest_dir.join(filename);
+                match fs::copy(&path, &dest) {
+                    Ok(_) => {
+                        println!("Installed resource: {}", dest.display());
+                        installed.push((path, dest));
+                    }
+                    Err(e) => eprintln!("Failed to copy resource {}: {}", filename, e),
+                }
+            }
+            
+            // Handle schema files
+            if filename.ends_with(".gschema.xml") {
+                let dest_dir = install_path.join("share/glib-2.0/schemas");
+                fs::create_dir_all(&dest_dir).unwrap();
+                let dest = dest_dir.join(filename);
+                match fs::copy(&path, &dest) {
+                    Ok(_) => {
+                        println!("Installed schema: {}", dest.display());
+                        installed.push((path, dest));
+                    }
+                    Err(e) => eprintln!("Failed to copy schema {}: {}", filename, e),
+                }
+            }
+            
+            // Handle desktop files
+            if filename.ends_with(".desktop") {
+                let dest_dir = install_path.join("share/applications");
+                fs::create_dir_all(&dest_dir).unwrap();
+                let dest = dest_dir.join(filename);
+                match fs::copy(&path, &dest) {
+                    Ok(_) => {
+                        println!("Installed desktop file: {}", dest.display());
+                        installed.push((path, dest));
+                    }
+                    Err(e) => eprintln!("Failed to copy desktop file {}: {}", filename, e),
+                }
+            }
+            
+            // Handle icon directories
+            if path.is_dir() && filename == "icons" {
+                let dest_dir = install_path.join("share/icons");
+                match copy_dir_all(&path, &dest_dir) {
+                    Ok(_) => println!("Installed icons to: {}", dest_dir.display()),
+                    Err(e) => eprintln!("Failed to copy icons: {}", e),
+                }
+            }
+        }
+    }
+    
+    // Also check for data in build directory if it exists
+    let build_data = source_dir.join("build").join("data");
+    if build_data.exists() {
+        for entry in fs::read_dir(&build_data).unwrap_or_default() {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let path = entry.path();
+            let filename = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            
+            if filename.ends_with(".gresource") {
+                let dest_dir = install_path.join("share").join(repo);
+                fs::create_dir_all(&dest_dir).unwrap();
+                let dest = dest_dir.join(filename);
+                if let Ok(_) = fs::copy(&path, &dest) {
+                    println!("Installed built resource: {}", dest.display());
+                    installed.push((path, dest));
+                }
+            }
+        }
+    }
+    
+    installed
+}
+
+/// Recursively copy directory
+fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    fs::create_dir_all(&dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let path = entry.path();
+        let dest = dst.as_ref().join(entry.file_name());
+        
+        if path.is_dir() {
+            copy_dir_all(&path, &dest)?;
+        } else {
+            fs::copy(&path, &dest)?;
+        }
+    }
+    Ok(())
+}
+
 fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Option<String> {
     // Try to get expected names from build files
     let mut search_names = Vec::new();
@@ -429,6 +646,7 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         build_dir.join("build"),
         build_dir.join("out"),
         build_dir.join("target"),
+        build_dir.join("src"),  // Common for meson projects
     ];
 
     // First, try to find executables with expected names
@@ -545,6 +763,35 @@ fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, String
     matches
 }
 
+/// Find package by exact key (handles supplier-prefixed keys)
+fn find_package_by_key(pkg_key: &str) -> Option<(String, String, String)> {
+    let packages = read_package_list();
+    
+    // Direct match first
+    if let Some(info_path) = packages.get(pkg_key) {
+        // Try to read supplier from info file
+        if let Ok(content) = fs::read_to_string(info_path) {
+            if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+                let supplier = info.get("supplier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("github.com")
+                    .to_string();
+                return Some((pkg_key.to_string(), supplier, info_path.clone()));
+            }
+        }
+    }
+    
+    // Try parsing as user/repo and find matches
+    let (user, repo) = parse_pkg(pkg_key);
+    let matches = find_matching_packages(&user, &repo);
+    
+    if matches.len() == 1 {
+        return Some(matches[0].clone());
+    }
+    
+    None
+}
+
 fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<usize> {
     println!("Multiple packages found:");
     for (i, (pkg_key, supplier, _)) in matches.iter().enumerate() {
@@ -568,7 +815,7 @@ fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<usiz
 }
 
 fn get_supplier_from_url(url: &str) -> Option<String> {
-    // Extract domain from URL like "https://gitlab.com/user/repo.git"
+    // Extract domain from URL like "https://gitlab.com/user/repo.git "
     if let Some(start) = url.find("://") {
         let after_protocol = &url[start + 3..];
         if let Some(end) = after_protocol.find('/') {
@@ -629,10 +876,10 @@ fn write_package_list(packages: &HashMap<String, String>) {
 
 fn install(package: &str, verbose: bool, supplier: Option<&str>) {
     let (user, repo) = parse_pkg(package);
-    let url = build_git_url(user, repo, supplier);
+    let url = build_git_url(&user, &repo, supplier);
     let supplier_domain = supplier.unwrap_or("github.com");
 
-    let path = temp_path(user, repo);
+    let path = temp_path(&user, &repo);
     if Path::new(&path).exists() {
         fs::remove_dir_all(&path).unwrap();
     }
@@ -693,7 +940,7 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>) {
         }
     }
 
-    build(user, repo, verbose, Some(supplier_domain));
+    build(&user, &repo, verbose, Some(supplier_domain));
 }
 
 
@@ -753,8 +1000,11 @@ fn build_cmake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Opt
     let build_dir = Path::new(temp).join("build");
     fs::create_dir_all(&build_dir).unwrap();
 
+    // Configure with install prefix
     let mut cmake_cmd = Command::new("cmake");
-    cmake_cmd.arg("..").current_dir(&build_dir);
+    cmake_cmd.arg("..")
+        .arg(format!("-DCMAKE_INSTALL_PREFIX={}", install_path))
+        .current_dir(&build_dir);
     if !verbose {
         cmake_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -764,6 +1014,7 @@ fn build_cmake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Opt
         return None;
     }
 
+    // Build
     let mut make_cmd = Command::new("make");
     make_cmd.current_dir(&build_dir);
     if !verbose {
@@ -775,26 +1026,40 @@ fn build_cmake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Opt
         return Some(make_status);
     }
 
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    // Install (this handles data files properly)
+    let mut install_cmd = Command::new("make");
+    install_cmd.arg("install").current_dir(&build_dir);
+    if !verbose {
+        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let install_status = install_cmd.status().unwrap();
 
-    match find_built_executable(&build_dir, repo, "cmake") {
-        Some(exe_path) => {
-            println!("Found executable: {}", exe_path);
-            let dest = bin_dir.join(repo);
-            fs::copy(&exe_path, &dest).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&dest).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&dest, perms).unwrap();
+    // Find the executable in the install prefix
+    let bin_dir = Path::new(install_path).join("bin");
+    let exe_path = bin_dir.join(repo);
+    
+    if exe_path.exists() {
+        Some(install_status)
+    } else {
+        // Fallback: manually find and copy executable
+        match find_built_executable(&build_dir, repo, "cmake") {
+            Some(built_exe) => {
+                fs::create_dir_all(&bin_dir).unwrap();
+                let dest = bin_dir.join(repo);
+                fs::copy(&built_exe, &dest).unwrap();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = fs::metadata(&dest).unwrap().permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&dest, perms).unwrap();
+                }
+                Some(install_status)
             }
-            Some(make_status)
-        }
-        None => {
-            eprintln!("Could not find executable after build");
-            None
+            None => {
+                eprintln!("Could not find executable after build");
+                None
+            }
         }
     }
 }
@@ -802,8 +1067,12 @@ fn build_cmake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Opt
 fn build_meson(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
     let build_dir = Path::new(temp).join("build");
     
+    // Setup with prefix
     let mut setup_cmd = Command::new("meson");
-    setup_cmd.arg("setup").arg(&build_dir).current_dir(temp);
+    setup_cmd.arg("setup")
+        .arg(&build_dir)
+        .arg(format!("--prefix={}", install_path))
+        .current_dir(temp);
     if !verbose {
         setup_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -813,6 +1082,7 @@ fn build_meson(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Opt
         return None;
     }
 
+    // Compile
     let mut compile_cmd = Command::new("meson");
     compile_cmd.arg("compile").arg("-C").arg(&build_dir);
     if !verbose {
@@ -824,28 +1094,40 @@ fn build_meson(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Opt
         return Some(compile_status);
     }
 
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    // Install - this is crucial for GTK apps with resources
+    println!("Installing with meson (this handles data files)...");
+    let mut install_cmd = Command::new("meson");
+    install_cmd.arg("install").arg("-C").arg(&build_dir);
+    if !verbose {
+        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let install_status = install_cmd.status().unwrap();
 
-    match find_built_executable(&build_dir, repo, "meson") {
-        Some(exe_path) => {
-            println!("Found executable: {}", exe_path);
-            let dest = bin_dir.join(repo);
-            fs::copy(&exe_path, &dest).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&dest).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&dest, perms).unwrap();
+    // Check if executable exists in install prefix
+    let bin_dir = Path::new(install_path).join("bin");
+    let exe_path = bin_dir.join(repo);
+    
+    if !exe_path.exists() {
+        // Meson might install with different name, search for it
+        if let Ok(entries) = fs::read_dir(&bin_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    // Check if it's close to repo name
+                    if name.to_lowercase() == repo.to_lowercase() || 
+                       name.contains(&repo.to_lowercase()) {
+                        // Create symlink with expected name
+                        let dest = bin_dir.join(repo);
+                        let _ = std::os::unix::fs::symlink(&path, &dest);
+                        break;
+                    }
+                }
             }
-            Some(compile_status)
-        }
-        None => {
-            eprintln!("Could not find executable after build");
-            None
         }
     }
+
+    Some(install_status)
 }
 
 fn build_mason(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
@@ -867,7 +1149,10 @@ fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> std::p
     cmd.status().unwrap()
 }
 
-fn build_npm(temp: &str, verbose: bool) -> std::process::ExitStatus {
+fn build_npm(temp: &str, install_path: &str, repo: &str, verbose: bool) -> std::process::ExitStatus {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
     let mut install_cmd = Command::new("npm");
     install_cmd.arg("install").current_dir(temp);
     if !verbose {
@@ -886,17 +1171,86 @@ fn build_npm(temp: &str, verbose: bool) -> std::process::ExitStatus {
     }
     let _ = build_cmd.status();
 
-    println!("Note: npm packages installed in place at {}", temp);
+    // Try to find the main entry point or built files
+    let package_json = Path::new(temp).join("package.json");
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            // Check for bin field
+            if let Some(bin) = json.get("bin") {
+                let bin_path = if bin.is_string() {
+                    bin.as_str().map(|s| Path::new(temp).join(s))
+                } else if let Some(obj) = bin.as_object() {
+                    obj.get(repo).and_then(|v| v.as_str()).map(|s| Path::new(temp).join(s))
+                } else {
+                    None
+                };
+                
+                if let Some(src) = bin_path {
+                    if src.exists() {
+                        let dest = bin_dir.join(repo);
+                        // Create wrapper script if it's a JS file
+                        if src.extension().and_then(|e| e.to_str()) == Some("js") {
+                            let wrapper = format!("#!/usr/bin/env node\nrequire('{}');", src.display());
+                            fs::write(&dest, wrapper).unwrap();
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let mut perms = fs::metadata(&dest).unwrap().permissions();
+                                perms.set_mode(0o755);
+                                fs::set_permissions(&dest, perms).unwrap();
+                            }
+                        } else {
+                            fs::copy(&src, &dest).unwrap();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Note: npm package installed at {}", install_path);
     install_status
 }
 
-fn build_gradle(temp: &str, verbose: bool) -> std::process::ExitStatus {
+fn build_gradle(temp: &str, install_path: &str, repo: &str, verbose: bool) -> std::process::ExitStatus {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
     let mut cmd = Command::new("gradle");
     cmd.arg("build").current_dir(temp);
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    cmd.status().unwrap()
+    let status = cmd.status().unwrap();
+
+    // Find built JAR and create wrapper script
+    if status.success() {
+        let build_libs = Path::new(temp).join("build/libs");
+        if let Ok(entries) = fs::read_dir(&build_libs) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("jar") {
+                    let dest_jar = bin_dir.join(format!("{}.jar", repo));
+                    fs::copy(&path, &dest_jar).unwrap();
+                    
+                    // Create wrapper script
+                    let wrapper = bin_dir.join(repo);
+                    let script = format!("#!/bin/bash\nexec java -jar \"{}\" \"$@\"", dest_jar.display());
+                    fs::write(&wrapper, script).unwrap();
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        let mut perms = fs::metadata(&wrapper).unwrap().permissions();
+                        perms.set_mode(0o755);
+                        fs::set_permissions(&wrapper, perms).unwrap();
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    status
 }
 
 fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
@@ -922,8 +1276,8 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
         "meson" => build_meson(&temp, &install_path, repo, verbose),
         "mason" => build_mason(&temp, &install_path, repo, verbose),
         "go" => Some(build_go(&temp, &install_path, repo, verbose)),
-        "npm" => Some(build_npm(&temp, verbose)),
-        "gradle" => Some(build_gradle(&temp, verbose)),
+        "npm" => Some(build_npm(&temp, &install_path, repo, verbose)),
+        "gradle" => Some(build_gradle(&temp, &install_path, repo, verbose)),
         _ => {
             println!("Unsupported build system: {}", bs);
             return;
@@ -940,6 +1294,12 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
 
     if status.success() {
         println!("Installed to {}", install_path);
+
+        // Install data files (resources, schemas, etc.) for GTK/GLib apps
+        let data_files = install_data_files(Path::new(&temp), Path::new(&install_path), repo);
+        if !data_files.is_empty() {
+            println!("Installed {} data file(s)", data_files.len());
+        }
 
         if bs != "npm" {
             let _ = fs::remove_dir_all(&temp);
@@ -981,6 +1341,55 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
             false
         };
 
+        // Create wrapper script that sets environment variables for resources
+        let needs_wrapper = !data_files.is_empty();
+        let final_exe_path = if needs_wrapper {
+            // Create wrapper script
+            let wrapper_path = Path::new(&install_path).join("bin").join(format!("{}-wrapper", repo));
+            let gresource_path = Path::new(&install_path).join("share").join(repo);
+            
+            let wrapper_content = format!(
+                r#"#!/bin/bash
+# Wrapper for {} - sets up resource paths
+export GRESOURCE_PATH="{}:$GRESOURCE_PATH"
+export XDG_DATA_DIRS="{}:$XDG_DATA_DIRS"
+exec {} "$@"
+"#,
+                repo,
+                gresource_path.display(),
+                Path::new(&install_path).join("share").display(),
+                exe_path.display()
+            );
+            
+            fs::write(&wrapper_path, wrapper_content).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&wrapper_path).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&wrapper_path, perms).unwrap();
+            }
+            
+            // Update symlink to point to wrapper
+            if symlink_created {
+                let _ = Command::new("sudo")
+                    .arg("rm")
+                    .arg("-f")
+                    .arg(&symlink_path)
+                    .status();
+                let _ = Command::new("sudo")
+                    .arg("ln")
+                    .arg("-s")
+                    .arg(&wrapper_path)
+                    .arg(&symlink_path)
+                    .status();
+            }
+            
+            wrapper_path
+        } else {
+            exe_path.clone()
+        };
+
         if !symlink_created {
             eprintln!("Trying ~/.local/bin instead...");
 
@@ -989,16 +1398,22 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
             let local_symlink = local_bin.join(repo);
             let _ = fs::remove_file(&local_symlink);
 
-            match std::os::unix::fs::symlink(&exe_path, &local_symlink) {
+            let target = if needs_wrapper {
+                &final_exe_path
+            } else {
+                &exe_path
+            };
+
+            match std::os::unix::fs::symlink(target, &local_symlink) {
                 Ok(_) => {
-                    println!("Created symlink: {} -> {}", local_symlink.display(), exe_path.display());
+                    println!("Created symlink: {} -> {}", local_symlink.display(), target.display());
                     println!("Note: Make sure ~/.local/bin is in your PATH");
                     println!("Add this to your ~/.bashrc or ~/.zshrc:");
                     println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
                 }
                 Err(e) => {
                     eprintln!("Failed to create symlink: {}", e);
-                    println!("You can run the executable directly at: {}", exe_path.display());
+                    println!("You can run the executable directly at: {}", target.display());
                 }
             }
         }
@@ -1026,7 +1441,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
                 .lines()
                 .map(|l| {
                     if l.starts_with("Exec=") {
-                        format!("Exec={}", exe_path.to_str().unwrap())
+                        format!("Exec={}", final_exe_path.to_str().unwrap())
                     } else {
                         l.to_string()
                     }
@@ -1047,6 +1462,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
             &final_symlink_path,
             desktop_path.as_deref(),
             supplier_domain,
+            !data_files.is_empty(), // Track if package has data files
         );
 
         println!("Metadata written to info.gitpkg");
@@ -1065,6 +1481,7 @@ fn write_info(
     symlink_path: &str,
     desktop_path: Option<&str>,
     supplier: &str,
+    has_data_files: bool,
 ) {
     use chrono::Utc;
 
@@ -1086,7 +1503,8 @@ fn write_info(
          timestamp = \"{}\"\n\
          install_path = \"{}\"\n\
          symlink_path = \"{}\"\n\
-         supplier = \"{}\"\n",
+         supplier = \"{}\"\n\
+         has_data_files = {}\n",
         user,
         repo,
         commit,
@@ -1095,7 +1513,8 @@ fn write_info(
         Utc::now().to_rfc3339(),
         install_path,
         symlink_path,
-        supplier
+        supplier,
+        has_data_files
     );
 
     if let Some(dp) = desktop_path {
@@ -1112,7 +1531,7 @@ fn remove(package: &str) {
     let (user, repo) = parse_pkg(package);
     
     // Find all matching packages
-    let matches = find_matching_packages(user, repo);
+    let matches = find_matching_packages(&user, &repo);
     
     if matches.is_empty() {
         eprintln!("Package {}/{} is not installed", user, repo);
@@ -1192,7 +1611,7 @@ fn remove(package: &str) {
     }
     
     // Clean up temp directory if it exists
-    let temp = temp_path(user, repo);
+    let temp = temp_path(&user, &repo);
     if Path::new(&temp).exists() {
         let _ = fs::remove_dir_all(&temp);
     }
@@ -1204,33 +1623,47 @@ fn remove(package: &str) {
 }
 
 fn clean(package: &str) {
-    let (user, repo) = parse_pkg(package);
+    // Use the new parsing that handles supplier-prefixed keys
+    let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
     
-    // Find all matching packages
-    let matches = find_matching_packages(user, repo);
+    // First try exact key lookup (for supplier-prefixed packages like "codeberg_el1lovescomputers/gitpkg")
+    let exact_match = find_package_by_key(package);
     
-    if matches.is_empty() {
-        println!("Package {}/{} is not installed, nothing to clean", user, repo);
-        return;
-    }
-    
-    let (pkg_key, supplier, info_path) = if matches.len() > 1 {
-        // Multiple packages found, prompt user
-        match prompt_package_selection(&matches) {
-            Some(idx) => matches[idx].clone(),
-            None => {
-                eprintln!("Invalid selection");
-                return;
-            }
-        }
+    let (pkg_key, supplier, info_path) = if let Some(m) = exact_match {
+        m
     } else {
-        matches[0].clone()
+        // Fall back to searching by user/repo
+        let matches = find_matching_packages(&user, &repo);
+        
+        if matches.is_empty() {
+            println!("Package {} is not installed, nothing to clean", package);
+            return;
+        }
+        
+        // If supplier was hinted from the package key, prefer that match
+        let selected = if let Some(ref sup) = supplier_hint {
+            matches.iter()
+                .position(|(_, s, _)| s == sup)
+                .unwrap_or(0)
+        } else if matches.len() > 1 {
+            match prompt_package_selection(&matches) {
+                Some(idx) => idx,
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+        
+        matches[selected].clone()
     };
     
     println!("Cleaning old versions and temp files for {} from {}...", pkg_key, supplier);
     
     // Clean temp directory for this package
-    let temp = temp_path(user, repo);
+    let temp = temp_path(&user, &repo);
     if Path::new(&temp).exists() {
         match fs::remove_dir_all(&temp) {
             Ok(_) => println!("Removed temp directory: {}", temp),
@@ -1357,11 +1790,15 @@ fn list() {
                 let supplier = info.get("supplier")
                     .and_then(|v| v.as_str())
                     .unwrap_or("github.com");
+                let has_data = info.get("has_data_files")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 
                 println!("Package:    {}", package);
                 println!("  Commit:   {} ({})", &commit[..commit.len().min(8)], commit);
                 println!("  Build:    {}", build_sys);
                 println!("  Supplier: {}", supplier);
+                println!("  Data:     {}", if has_data { "yes" } else { "no" });
                 println!("  Installed: {}", timestamp);
                 println!();
             } else {
@@ -1384,7 +1821,7 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
     let (user, repo) = parse_pkg(package);
     
     // Find all matching packages
-    let matches = find_matching_packages(user, repo);
+    let matches = find_matching_packages(&user, &repo);
     
     if matches.is_empty() {
         eprintln!("Package {}/{} is not installed. Use 'install' instead.", user, repo);
@@ -1446,8 +1883,8 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
     println!("Current commit: {}", current_commit);
     
     // Clone to temp to get latest commit
-    let url = build_git_url(user, repo, Some(supplier_to_use));
-    let path = temp_path(user, repo);
+    let url = build_git_url(&user, &repo, Some(supplier_to_use));
+    let path = temp_path(&user, &repo);
     
     if Path::new(&path).exists() {
         fs::remove_dir_all(&path).unwrap();
@@ -1480,7 +1917,7 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
     println!("Update available! Building new version...");
     
     // Build the new version (this will create a new install path with the new commit hash)
-    build(user, repo, verbose, Some(supplier_to_use));
+    build(&user, &repo, verbose, Some(supplier_to_use));
     
     println!("Successfully upgraded {} from {} to {}", pkg_key, &current_commit[..8], &latest_commit[..8]);
 }
