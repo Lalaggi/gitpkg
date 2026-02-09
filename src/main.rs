@@ -9,15 +9,13 @@ use std::{
 fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
-        eprintln!(
-            "Usage: gitpkg <install|remove|clean|list|upgrade> [args] [-v] [--supplier <domain>]"
-        );
+        eprintln!("Usage: gitpkg <install|remove|clean|list|upgrade> [args] [-v] [--supplier <domain>]");
         std::process::exit(1);
     }
 
     let verbose = args.contains(&"-v".to_string());
     let command = &args[1];
-
+    
     // Parse --supplier flag
     let supplier = if let Some(pos) = args.iter().position(|arg| arg == "--supplier") {
         if pos + 1 < args.len() {
@@ -58,9 +56,7 @@ fn main() {
         "list" => list(),
         "upgrade" => {
             if args.len() < 3 {
-                eprintln!(
-                    "Usage: gitpkg upgrade <user>/<repo> or gitpkg upgrade all [--supplier <domain>]"
-                );
+                eprintln!("Usage: gitpkg upgrade <user>/<repo> or gitpkg upgrade all [--supplier <domain>]");
                 return;
             }
             if &args[2] == "all" {
@@ -80,11 +76,7 @@ fn parse_pkg(arg: &str) -> (&str, &str) {
 
 fn temp_path(user: &str, repo: &str) -> String {
     let hash = format!("{:x}", md5::compute(format!("{}{}", user, repo)));
-    format!(
-        "{}/.local/share/gitpkg/temp/{}",
-        env::var("HOME").unwrap(),
-        hash
-    )
+    format!("{}/.local/share/gitpkg/temp/{}", env::var("HOME").unwrap(), hash)
 }
 
 fn install_root(user: &str, repo: &str, commit: &str, supplier: &str) -> String {
@@ -108,14 +100,17 @@ fn is_installed(bin: &str) -> bool {
 }
 
 fn detect_build_system(path: &str) -> Option<&'static str> {
+    // Priority order: Universal build systems first, then language-specific
     for (file, sys) in [
-        ("Cargo.toml", "cargo"),
+        // Universal build systems (higher priority)
         ("Makefile", "make"),
         ("CMakeLists.txt", "cmake"),
-        ("package.json", "npm"),
-        ("build.gradle", "gradle"),
         ("meson.build", "meson"),
         ("mason.toml", "mason"),
+        // Language-specific build systems (lower priority)
+        ("Cargo.toml", "cargo"),
+        ("package.json", "npm"),
+        ("build.gradle", "gradle"),
         ("go.mod", "go"),
     ] {
         if Path::new(path).join(file).exists() {
@@ -191,34 +186,29 @@ fn get_commit_hash(path: &str) -> Option<String> {
 
 fn find_executables_in_makefile(makefile_path: &Path, repo: &str) -> Vec<String> {
     let mut targets = Vec::new();
-
+    
     if let Ok(content) = fs::read_to_string(makefile_path) {
         for line in content.lines() {
             let line = line.trim();
-
+            
             // Look for target definitions (lines ending with :)
             if let Some(colon_pos) = line.find(':') {
                 let target = line[..colon_pos].trim();
                 // Skip special targets and targets with wildcards
-                if !target.is_empty()
-                    && !target.starts_with('.')
+                if !target.is_empty() 
+                    && !target.starts_with('.') 
                     && !target.contains('%')
                     && !target.contains('$')
                     && target != "all"
                     && target != "clean"
                     && target != "install"
-                    && target != "test"
-                {
+                    && target != "test" {
                     targets.push(target.to_string());
                 }
             }
-
+            
             // Look for gcc/g++/clang output with -o flag
-            if line.contains("gcc")
-                || line.contains("g++")
-                || line.contains("clang")
-                || line.contains("cc")
-            {
+            if line.contains("gcc") || line.contains("g++") || line.contains("clang") || line.contains("cc") {
                 if let Some(o_pos) = line.find("-o") {
                     let after_o = &line[o_pos + 2..].trim();
                     if let Some(first_word) = after_o.split_whitespace().next() {
@@ -228,31 +218,211 @@ fn find_executables_in_makefile(makefile_path: &Path, repo: &str) -> Vec<String>
             }
         }
     }
-
+    
     // Always include the repo name and common variations
     targets.push(repo.to_string());
     targets.push(repo.to_lowercase());
     targets.push("a.out".to_string());
     targets.push("main".to_string());
+    
+    targets
+}
+
+fn find_executables_in_meson(meson_path: &Path, repo: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+
+    if let Ok(content) = fs::read_to_string(meson_path) {
+        for line in content.lines() {
+            let line = line.trim();
+
+            // Look for executable() calls: executable('name', ...)
+            if line.contains("executable(") {
+                if let Some(start) = line.find("executable(") {
+                    let after_exec = &line[start + 11..];
+                    // Find the first quoted string
+                    if let Some(quote_start) = after_exec.find('\'') {
+                        let after_quote = &after_exec[quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('\'') {
+                            targets.push(after_quote[..quote_end].to_string());
+                        }
+                    } else if let Some(quote_start) = after_exec.find('"') {
+                        let after_quote = &after_exec[quote_start + 1..];
+                        if let Some(quote_end) = after_quote.find('"') {
+                            targets.push(after_quote[..quote_end].to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to common names
+    if targets.is_empty() {
+        targets.push(repo.to_string());
+        targets.push(repo.to_lowercase());
+    }
 
     targets
 }
 
-fn find_built_executable(build_dir: &Path, repo: &str) -> Option<String> {
-    // First try to parse Makefile if it exists
-    let makefile = build_dir.join("Makefile");
-    let search_names = if makefile.exists() {
-        find_executables_in_makefile(&makefile, repo)
-    } else {
-        vec![
+fn find_executables_in_cmake(cmake_path: &Path, repo: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+
+    if let Ok(content) = fs::read_to_string(cmake_path) {
+        for line in content.lines() {
+            let line = line.trim();
+
+            // Look for add_executable() calls: add_executable(name ...)
+            if line.contains("add_executable(") {
+                if let Some(start) = line.find("add_executable(") {
+                    let after_exec = &line[start + 15..];
+                    // Get the first word (executable name)
+                    if let Some(first_word) = after_exec.split_whitespace().next() {
+                        let name = first_word.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+                        if !name.is_empty() {
+                            targets.push(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Fallback to common names
+    if targets.is_empty() {
+        targets.push(repo.to_string());
+        targets.push(repo.to_lowercase());
+    }
+
+    targets
+}
+
+fn find_all_executables_recursive(dir: &Path) -> Vec<String> {
+    let mut executables = Vec::new();
+    
+    fn search_dir(dir: &Path, executables: &mut Vec<String>) {
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                
+                if path.is_dir() {
+                    // Skip hidden directories and common build artifact dirs
+                    let dir_name = path.file_name().unwrap().to_string_lossy();
+                    if !dir_name.starts_with('.') 
+                        && dir_name != "node_modules"
+                        && dir_name != "target" {
+                        search_dir(&path, executables);
+                    }
+                } else if path.is_file() {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        if let Ok(metadata) = fs::metadata(&path) {
+                            if metadata.permissions().mode() & 0o111 != 0 {
+                                let filename = path.file_name().unwrap().to_string_lossy();
+                                // Skip scripts and common non-binary executables
+                                if !filename.ends_with(".sh")
+                                    && !filename.ends_with(".py")
+                                    && !filename.ends_with(".pl")
+                                    && !filename.ends_with(".rb")
+                                    && !filename.ends_with(".js")
+                                    && !filename.starts_with(".")
+                                    && !filename.contains("Makefile")
+                                    && !filename.contains("CMake") {
+                                    executables.push(path.to_string_lossy().to_string());
+                                }
+                            }
+                        }
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        // On non-Unix, check for .exe files
+                        if path.extension().and_then(|s| s.to_str()) == Some("exe") {
+                            executables.push(path.to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    search_dir(dir, &mut executables);
+    executables
+}
+
+fn prompt_executable_selection(executables: &[String]) -> Option<String> {
+    if executables.is_empty() {
+        return None;
+    }
+    
+    if executables.len() == 1 {
+        return Some(executables[0].clone());
+    }
+    
+    println!("\nMultiple executables found:");
+    for (i, exe) in executables.iter().enumerate() {
+        println!("[{}] {}", i + 1, exe);
+    }
+    
+    print!("Select the main executable (1-{}): ", executables.len());
+    use std::io::{self, Write};
+    io::stdout().flush().unwrap();
+    
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).ok()?;
+    
+    if let Ok(choice) = input.trim().parse::<usize>() {
+        if choice >= 1 && choice <= executables.len() {
+            return Some(executables[choice - 1].clone());
+        }
+    }
+    
+    None
+}
+
+fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Option<String> {
+    // Try to get expected names from build files
+    let mut search_names = Vec::new();
+    
+    match build_system {
+        "make" => {
+            let makefile = build_dir.join("Makefile");
+            if makefile.exists() {
+                search_names = find_executables_in_makefile(&makefile, repo);
+            }
+        }
+        "meson" => {
+            let meson_file = build_dir.parent().and_then(|p| {
+                let mf = p.join("meson.build");
+                if mf.exists() { Some(mf) } else { None }
+            });
+            if let Some(mf) = meson_file {
+                search_names = find_executables_in_meson(&mf, repo);
+            }
+        }
+        "cmake" => {
+            let cmake_file = build_dir.parent().and_then(|p| {
+                let cf = p.join("CMakeLists.txt");
+                if cf.exists() { Some(cf) } else { None }
+            });
+            if let Some(cf) = cmake_file {
+                search_names = find_executables_in_cmake(&cf, repo);
+            }
+        }
+        _ => {}
+    }
+    
+    // Fallback names if build file parsing didn't find anything
+    if search_names.is_empty() {
+        search_names = vec![
             repo.to_string(),
             repo.to_lowercase(),
             "a.out".to_string(),
             "main".to_string(),
-        ]
-    };
+        ];
+    }
 
-    // Search for executables in the build directory and subdirectories
+    // Search for executables in common build output directories
     let search_dirs = vec![
         build_dir.to_path_buf(),
         build_dir.join("bin"),
@@ -261,16 +431,15 @@ fn find_built_executable(build_dir: &Path, repo: &str) -> Option<String> {
         build_dir.join("target"),
     ];
 
-    for dir in search_dirs {
+    // First, try to find executables with expected names
+    for dir in &search_dirs {
         if !dir.exists() {
             continue;
         }
 
-        // Check each potential name
         for exe_name in &search_names {
             let exe_path = dir.join(exe_name);
             if exe_path.exists() && exe_path.is_file() {
-                // Check if it's executable
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -286,67 +455,35 @@ fn find_built_executable(build_dir: &Path, repo: &str) -> Option<String> {
                 }
             }
         }
-
-        // Also search all files in the directory for executables
-        if let Ok(entries) = fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                if let Ok(metadata) = entry.metadata() {
-                    if metadata.is_file() {
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            if metadata.permissions().mode() & 0o111 != 0 {
-                                // Found an executable file
-                                let path = entry.path();
-                                let filename = path.file_name().unwrap().to_string_lossy();
-                                // Skip common non-executable files
-                                if !filename.ends_with(".sh")
-                                    && !filename.ends_with(".py")
-                                    && !filename.ends_with(".pl")
-                                    && !filename.starts_with(".")
-                                    && !filename.contains("Makefile")
-                                {
-                                    return Some(path.to_string_lossy().to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
     }
 
-    None
+    // If not found, search recursively for ALL executables
+    println!("Expected executable not found, searching entire build directory...");
+    let all_executables = find_all_executables_recursive(build_dir);
+    
+    if all_executables.is_empty() {
+        return None;
+    }
+    
+    // Prompt user to select if multiple found
+    prompt_executable_selection(&all_executables)
 }
 
 fn list_file_path() -> String {
-    format!(
-        "{}/.local/share/gitpkg/list.gitpkg",
-        env::var("HOME").unwrap()
-    )
+    format!("{}/.local/share/gitpkg/list.gitpkg", env::var("HOME").unwrap())
 }
 
 fn build_git_url(user: &str, repo: &str, supplier: Option<&str>) -> String {
     let supplier_domain = supplier.unwrap_or("github.com");
-
+    
+    // Handle different URL formats for different suppliers
     let repo_name = if repo.ends_with(".git") {
         repo.to_string()
     } else {
         format!("{}.git", repo)
     };
-
-    match supplier_domain {
-        // SourceHut special case
-        // Repos live at git.sr.ht and users are prefixed with ~
-        "sr.ht" | "git.sr.ht" => {
-            format!("https://git.sr.ht/~{}/{}", user, repo_name)
-        }
-
-        // Default: GitHub / GitLab / Codeberg style
-        _ => {
-            format!("https://{}/{}/{}", supplier_domain, user, repo_name)
-        }
-    }
+    
+    format!("https://{}/{}/{}", supplier_domain, user, repo_name)
 }
 
 fn normalize_supplier(supplier: &str) -> String {
@@ -374,7 +511,7 @@ fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, String
     // Returns Vec of (package_key, supplier, info_path)
     let packages = read_package_list();
     let mut matches = Vec::new();
-
+    
     for (pkg_key, info_path) in packages {
         // Check if this package matches user/repo
         // Could be "user/repo" (github) or "supplier_user/repo" (others)
@@ -382,20 +519,19 @@ fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, String
         if parts.len() == 2 {
             let pkg_repo = parts[1];
             let pkg_user_part = parts[0];
-
+            
             // Extract user from "supplier_user" or just "user"
             let pkg_user = if pkg_user_part.contains('_') {
                 pkg_user_part.split('_').last().unwrap_or("")
             } else {
                 pkg_user_part
             };
-
+            
             if pkg_user == user && pkg_repo == repo {
                 // Read supplier from info file
                 if let Ok(content) = fs::read_to_string(&info_path) {
                     if let Ok(info) = toml::from_str::<toml::Value>(&content) {
-                        let supplier = info
-                            .get("supplier")
+                        let supplier = info.get("supplier")
                             .and_then(|v| v.as_str())
                             .unwrap_or("github.com")
                             .to_string();
@@ -405,7 +541,7 @@ fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, String
             }
         }
     }
-
+    
     matches
 }
 
@@ -414,20 +550,20 @@ fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<usiz
     for (i, (pkg_key, supplier, _)) in matches.iter().enumerate() {
         println!("[{}] {}: {}", i + 1, supplier, pkg_key);
     }
-
+    
     print!("Select package (1-{}): ", matches.len());
     use std::io::{self, Write};
     io::stdout().flush().unwrap();
-
+    
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok()?;
-
+    
     if let Ok(choice) = input.trim().parse::<usize>() {
         if choice >= 1 && choice <= matches.len() {
             return Some(choice - 1);
         }
     }
-
+    
     None
 }
 
@@ -445,7 +581,7 @@ fn get_supplier_from_url(url: &str) -> Option<String> {
 fn read_package_list() -> HashMap<String, String> {
     let list_path = list_file_path();
     let mut packages = HashMap::new();
-
+    
     if let Ok(content) = fs::read_to_string(&list_path) {
         for line in content.lines() {
             let parts: Vec<&str> = line.split('=').collect();
@@ -454,7 +590,7 @@ fn read_package_list() -> HashMap<String, String> {
             }
         }
     }
-
+    
     packages
 }
 
@@ -473,22 +609,23 @@ fn remove_from_package_list(package_key: &str) {
 
 fn write_package_list(packages: &HashMap<String, String>) {
     let list_path = list_file_path();
-
+    
     // Ensure directory exists
     if let Some(parent) = Path::new(&list_path).parent() {
         fs::create_dir_all(parent).unwrap();
     }
-
+    
     let mut content = String::new();
     let mut sorted_packages: Vec<_> = packages.iter().collect();
     sorted_packages.sort_by_key(|(k, _)| k.as_str());
-
+    
     for (pkg, path) in sorted_packages {
         content.push_str(&format!("{} = {}\n", pkg, path));
     }
-
+    
     fs::write(&list_path, content).unwrap();
 }
+
 
 fn install(package: &str, verbose: bool, supplier: Option<&str>) {
     let (user, repo) = parse_pkg(package);
@@ -536,41 +673,12 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>) {
     if !is_installed(bs) {
         println!("Installing {} for {} via {}...", compiler, bs, pm);
         let status = match pm {
-            "apt" => Command::new("sudo")
-                .arg("apt")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "dnf" => Command::new("sudo")
-                .arg("dnf")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "yum" => Command::new("sudo")
-                .arg("yum")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "pacman" => Command::new("sudo")
-                .arg("pacman")
-                .arg("-Sy")
-                .arg("--noconfirm")
-                .arg(compiler)
-                .status(),
-            "zypper" => Command::new("sudo")
-                .arg("zypper")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "apk" => Command::new("sudo")
-                .arg("apk")
-                .arg("add")
-                .arg(compiler)
-                .status(),
+            "apt" => Command::new("sudo").arg("apt").arg("install").arg("-y").arg(compiler).status(),
+            "dnf" => Command::new("sudo").arg("dnf").arg("install").arg("-y").arg(compiler).status(),
+            "yum" => Command::new("sudo").arg("yum").arg("install").arg("-y").arg(compiler).status(),
+            "pacman" => Command::new("sudo").arg("pacman").arg("-Sy").arg("--noconfirm").arg(compiler).status(),
+            "zypper" => Command::new("sudo").arg("zypper").arg("install").arg("-y").arg(compiler).status(),
+            "apk" => Command::new("sudo").arg("apk").arg("add").arg(compiler).status(),
             "nix-env" => Command::new("nix-env").arg("-iA").arg(compiler).status(),
             _ => {
                 eprintln!("Unsupported package manager");
@@ -586,6 +694,209 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>) {
     }
 
     build(user, repo, verbose, Some(supplier_domain));
+}
+
+
+fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> std::process::ExitStatus {
+    let mut cmd = Command::new("cargo");
+    cmd.arg("install")
+        .arg("--path")
+        .arg(temp)
+        .arg("--root")
+        .arg(install_path)
+        .arg("--force");
+    if !verbose {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    cmd.status().unwrap()
+}
+
+fn build_make(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let mut make_cmd = Command::new("make");
+    make_cmd.current_dir(temp);
+    if !verbose {
+        make_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let make_status = make_cmd.status().unwrap();
+
+    if !make_status.success() {
+        return Some(make_status);
+    }
+
+    match find_built_executable(Path::new(temp), repo, "make") {
+        Some(exe_path) => {
+            println!("Found executable: {}", exe_path);
+            let dest = bin_dir.join(repo);
+            fs::copy(&exe_path, &dest).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&dest).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dest, perms).unwrap();
+            }
+            Some(make_status)
+        }
+        None => {
+            eprintln!("Could not find executable after build");
+            eprintln!("Searched in: {}", temp);
+            eprintln!("Try running with -v flag to see build output");
+            None
+        }
+    }
+}
+
+fn build_cmake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+    let build_dir = Path::new(temp).join("build");
+    fs::create_dir_all(&build_dir).unwrap();
+
+    let mut cmake_cmd = Command::new("cmake");
+    cmake_cmd.arg("..").current_dir(&build_dir);
+    if !verbose {
+        cmake_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    
+    if !cmake_cmd.status().unwrap().success() {
+        eprintln!("CMake configuration failed");
+        return None;
+    }
+
+    let mut make_cmd = Command::new("make");
+    make_cmd.current_dir(&build_dir);
+    if !verbose {
+        make_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let make_status = make_cmd.status().unwrap();
+
+    if !make_status.success() {
+        return Some(make_status);
+    }
+
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    match find_built_executable(&build_dir, repo, "cmake") {
+        Some(exe_path) => {
+            println!("Found executable: {}", exe_path);
+            let dest = bin_dir.join(repo);
+            fs::copy(&exe_path, &dest).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&dest).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dest, perms).unwrap();
+            }
+            Some(make_status)
+        }
+        None => {
+            eprintln!("Could not find executable after build");
+            None
+        }
+    }
+}
+
+fn build_meson(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+    let build_dir = Path::new(temp).join("build");
+    
+    let mut setup_cmd = Command::new("meson");
+    setup_cmd.arg("setup").arg(&build_dir).current_dir(temp);
+    if !verbose {
+        setup_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    
+    if !setup_cmd.status().unwrap().success() {
+        eprintln!("Meson setup failed");
+        return None;
+    }
+
+    let mut compile_cmd = Command::new("meson");
+    compile_cmd.arg("compile").arg("-C").arg(&build_dir);
+    if !verbose {
+        compile_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let compile_status = compile_cmd.status().unwrap();
+
+    if !compile_status.success() {
+        return Some(compile_status);
+    }
+
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    match find_built_executable(&build_dir, repo, "meson") {
+        Some(exe_path) => {
+            println!("Found executable: {}", exe_path);
+            let dest = bin_dir.join(repo);
+            fs::copy(&exe_path, &dest).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&dest).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dest, perms).unwrap();
+            }
+            Some(compile_status)
+        }
+        None => {
+            eprintln!("Could not find executable after build");
+            None
+        }
+    }
+}
+
+fn build_mason(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+    build_make(temp, install_path, repo, verbose)
+}
+
+fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> std::process::ExitStatus {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let mut cmd = Command::new("go");
+    cmd.arg("build")
+        .arg("-o")
+        .arg(bin_dir.join(repo))
+        .current_dir(temp);
+    if !verbose {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    cmd.status().unwrap()
+}
+
+fn build_npm(temp: &str, verbose: bool) -> std::process::ExitStatus {
+    let mut install_cmd = Command::new("npm");
+    install_cmd.arg("install").current_dir(temp);
+    if !verbose {
+        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let install_status = install_cmd.status().unwrap();
+
+    if !install_status.success() {
+        return install_status;
+    }
+
+    let mut build_cmd = Command::new("npm");
+    build_cmd.arg("run").arg("build").current_dir(temp);
+    if !verbose {
+        build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let _ = build_cmd.status();
+
+    println!("Note: npm packages installed in place at {}", temp);
+    install_status
+}
+
+fn build_gradle(temp: &str, verbose: bool) -> std::process::ExitStatus {
+    let mut cmd = Command::new("gradle");
+    cmd.arg("build").current_dir(temp);
+    if !verbose {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    cmd.status().unwrap()
 }
 
 fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
@@ -604,112 +915,25 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
     };
     println!("Building {} with {}", repo, bs);
 
-    // Build command per system
     let status = match bs {
-        "cargo" => {
-            let mut cmd = Command::new("cargo");
-            cmd.arg("install")
-                .arg("--path")
-                .arg(&temp)
-                .arg("--root")
-                .arg(&install_path)
-                .arg("--force");
-            if !verbose {
-                cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-            cmd.status().unwrap()
-        }
-        "make" | "cmake" | "meson" | "mason" => {
-            // Create bin directory
-            let bin_dir = Path::new(&install_path).join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-
-            // Run make
-            let mut make_cmd = Command::new("make");
-            make_cmd.current_dir(&temp);
-            if !verbose {
-                make_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-            let make_status = make_cmd.status().unwrap();
-
-            if !make_status.success() {
-                make_status
-            } else {
-                // Find the built executable
-                match find_built_executable(Path::new(&temp), repo) {
-                    Some(exe_path) => {
-                        println!("Found executable: {}", exe_path);
-                        let dest = bin_dir.join(repo);
-                        fs::copy(&exe_path, &dest).unwrap();
-                        // Make sure it's executable
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let mut perms = fs::metadata(&dest).unwrap().permissions();
-                            perms.set_mode(0o755);
-                            fs::set_permissions(&dest, perms).unwrap();
-                        }
-                        make_status
-                    }
-                    None => {
-                        eprintln!("Could not find executable after build");
-                        eprintln!("Searched in: {}", temp);
-                        eprintln!("Try running with -v flag to see build output");
-                        return;
-                    }
-                }
-            }
-        }
-        "go" => {
-            let bin_dir = Path::new(&install_path).join("bin");
-            fs::create_dir_all(&bin_dir).unwrap();
-
-            let mut cmd = Command::new("go");
-            cmd.arg("build")
-                .arg("-o")
-                .arg(bin_dir.join(repo))
-                .current_dir(&temp);
-            if !verbose {
-                cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-            cmd.status().unwrap()
-        }
-        "npm" => {
-            // Run npm install and npm build if available
-            let mut install_cmd = Command::new("npm");
-            install_cmd.arg("install").current_dir(&temp);
-            if !verbose {
-                install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-            let install_status = install_cmd.status().unwrap();
-
-            if !install_status.success() {
-                install_status
-            } else {
-                // Try npm run build or just mark as success
-                let mut build_cmd = Command::new("npm");
-                build_cmd.arg("run").arg("build").current_dir(&temp);
-                if !verbose {
-                    build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-                }
-                // Don't fail if build script doesn't exist
-                let _ = build_cmd.status();
-
-                // For npm packages, we'll just symlink the whole directory
-                println!("Note: npm packages installed in place at {}", temp);
-                install_status
-            }
-        }
-        "gradle" => {
-            let mut cmd = Command::new("gradle");
-            cmd.arg("build").current_dir(&temp);
-            if !verbose {
-                cmd.stdout(Stdio::null()).stderr(Stdio::null());
-            }
-            cmd.status().unwrap()
-        }
+        "cargo" => Some(build_cargo(&temp, &install_path, verbose)),
+        "make" => build_make(&temp, &install_path, repo, verbose),
+        "cmake" => build_cmake(&temp, &install_path, repo, verbose),
+        "meson" => build_meson(&temp, &install_path, repo, verbose),
+        "mason" => build_mason(&temp, &install_path, repo, verbose),
+        "go" => Some(build_go(&temp, &install_path, repo, verbose)),
+        "npm" => Some(build_npm(&temp, verbose)),
+        "gradle" => Some(build_gradle(&temp, verbose)),
         _ => {
             println!("Unsupported build system: {}", bs);
+            return;
+        }
+    };
+
+    let status = match status {
+        Some(s) => s,
+        None => {
+            println!("Build failed for {}", repo);
             return;
         }
     };
@@ -717,29 +941,24 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
     if status.success() {
         println!("Installed to {}", install_path);
 
-        // Remove old build files (only for non-npm)
         if bs != "npm" {
             let _ = fs::remove_dir_all(&temp);
         }
 
-        // Handle symlink and .desktop
         let exe_path = Path::new(&install_path).join("bin").join(repo);
 
-        // Authenticate sudo before creating symlink
         println!("Creating symlink to /usr/bin (requires sudo)...");
         let sudo_auth = Command::new("sudo").arg("-v").status();
 
         let symlink_path = Path::new("/usr/bin").join(repo);
 
         let symlink_created = if sudo_auth.is_ok() && sudo_auth.unwrap().success() {
-            // Remove old symlink if exists
             let _ = Command::new("sudo")
                 .arg("rm")
                 .arg("-f")
                 .arg(&symlink_path)
                 .status();
 
-            // Create new symlink with sudo
             let status = Command::new("sudo")
                 .arg("ln")
                 .arg("-s")
@@ -749,11 +968,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
 
             match status {
                 Ok(s) if s.success() => {
-                    println!(
-                        "Created symlink: {} -> {}",
-                        symlink_path.display(),
-                        exe_path.display()
-                    );
+                    println!("Created symlink: {} -> {}", symlink_path.display(), exe_path.display());
                     true
                 }
                 _ => {
@@ -769,7 +984,6 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
         if !symlink_created {
             eprintln!("Trying ~/.local/bin instead...");
 
-            // Fallback to ~/.local/bin
             let local_bin = Path::new(&env::var("HOME").unwrap()).join(".local/bin");
             fs::create_dir_all(&local_bin).unwrap();
             let local_symlink = local_bin.join(repo);
@@ -777,21 +991,14 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
 
             match std::os::unix::fs::symlink(&exe_path, &local_symlink) {
                 Ok(_) => {
-                    println!(
-                        "Created symlink: {} -> {}",
-                        local_symlink.display(),
-                        exe_path.display()
-                    );
+                    println!("Created symlink: {} -> {}", local_symlink.display(), exe_path.display());
                     println!("Note: Make sure ~/.local/bin is in your PATH");
                     println!("Add this to your ~/.bashrc or ~/.zshrc:");
                     println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
                 }
                 Err(e) => {
                     eprintln!("Failed to create symlink: {}", e);
-                    println!(
-                        "You can run the executable directly at: {}",
-                        exe_path.display()
-                    );
+                    println!("You can run the executable directly at: {}", exe_path.display());
                 }
             }
         }
@@ -808,10 +1015,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
         };
 
         let mut desktop_path = None;
-        let desktop_file_src = Path::new(&install_path)
-            .join("share")
-            .join("applications")
-            .join(format!("{}.desktop", repo));
+        let desktop_file_src = Path::new(&install_path).join("share").join("applications").join(format!("{}.desktop", repo));
         if desktop_file_src.exists() {
             let desktop_file_dst = Path::new(&env::var("HOME").unwrap())
                 .join(".local/share/applications")
@@ -899,22 +1103,22 @@ fn write_info(
     }
 
     fs::write(&info_file, toml_data).unwrap();
-
+    
     // Add to global package list
     add_to_package_list(user, repo, info_file.to_str().unwrap(), supplier);
 }
 
 fn remove(package: &str) {
     let (user, repo) = parse_pkg(package);
-
+    
     // Find all matching packages
     let matches = find_matching_packages(user, repo);
-
+    
     if matches.is_empty() {
         eprintln!("Package {}/{} is not installed", user, repo);
         return;
     }
-
+    
     let (pkg_key, supplier, info_path) = if matches.len() > 1 {
         // Multiple packages found, prompt user
         match prompt_package_selection(&matches) {
@@ -927,9 +1131,9 @@ fn remove(package: &str) {
     } else {
         matches[0].clone()
     };
-
+    
     println!("Removing {} from {}...", pkg_key, supplier);
-
+    
     // Read info file to get installation details
     let info_content = match fs::read_to_string(&info_path) {
         Ok(c) => c,
@@ -938,7 +1142,7 @@ fn remove(package: &str) {
             return;
         }
     };
-
+    
     let info: toml::Value = match toml::from_str(&info_content) {
         Ok(v) => v,
         Err(e) => {
@@ -946,7 +1150,7 @@ fn remove(package: &str) {
             return;
         }
     };
-
+    
     // Remove symlink
     if let Some(symlink_path) = info.get("symlink_path").and_then(|v| v.as_str()) {
         if Path::new(symlink_path).exists() {
@@ -962,7 +1166,7 @@ fn remove(package: &str) {
             println!("Removed symlink: {}", symlink_path);
         }
     }
-
+    
     // Remove desktop file
     if let Some(desktop_path) = info.get("desktop_file").and_then(|v| v.as_str()) {
         if Path::new(desktop_path).exists() {
@@ -972,50 +1176,44 @@ fn remove(package: &str) {
             }
         }
     }
-
+    
     // Remove installation directory (all versions)
     let package_dir = format!(
         "{}/.local/share/gitpkg/{}",
         env::var("HOME").unwrap(),
         pkg_key
     );
-
+    
     if Path::new(&package_dir).exists() {
         match fs::remove_dir_all(&package_dir) {
             Ok(_) => println!("Removed installation directory: {}", package_dir),
-            Err(e) => eprintln!(
-                "Failed to remove installation directory {}: {}",
-                package_dir, e
-            ),
+            Err(e) => eprintln!("Failed to remove installation directory {}: {}", package_dir, e),
         }
     }
-
+    
     // Clean up temp directory if it exists
     let temp = temp_path(user, repo);
     if Path::new(&temp).exists() {
         let _ = fs::remove_dir_all(&temp);
     }
-
+    
     // Remove from global package list
     remove_from_package_list(&pkg_key);
-
+    
     println!("Successfully removed {}", pkg_key);
 }
 
 fn clean(package: &str) {
     let (user, repo) = parse_pkg(package);
-
+    
     // Find all matching packages
     let matches = find_matching_packages(user, repo);
-
+    
     if matches.is_empty() {
-        println!(
-            "Package {}/{} is not installed, nothing to clean",
-            user, repo
-        );
+        println!("Package {}/{} is not installed, nothing to clean", user, repo);
         return;
     }
-
+    
     let (pkg_key, supplier, info_path) = if matches.len() > 1 {
         // Multiple packages found, prompt user
         match prompt_package_selection(&matches) {
@@ -1028,12 +1226,9 @@ fn clean(package: &str) {
     } else {
         matches[0].clone()
     };
-
-    println!(
-        "Cleaning old versions and temp files for {} from {}...",
-        pkg_key, supplier
-    );
-
+    
+    println!("Cleaning old versions and temp files for {} from {}...", pkg_key, supplier);
+    
     // Clean temp directory for this package
     let temp = temp_path(user, repo);
     if Path::new(&temp).exists() {
@@ -1042,7 +1237,7 @@ fn clean(package: &str) {
             Err(e) => eprintln!("Failed to remove temp directory: {}", e),
         }
     }
-
+    
     // Get current installed version from info.gitpkg
     let current_commit = if let Ok(content) = fs::read_to_string(&info_path) {
         if let Ok(info) = toml::from_str::<toml::Value>(&content) {
@@ -1055,22 +1250,22 @@ fn clean(package: &str) {
     } else {
         None
     };
-
+    
     if current_commit.is_none() {
         println!("Could not read current version, skipping old version cleanup");
         return;
     }
-
+    
     let current_commit = current_commit.unwrap();
     println!("Current version: {}", current_commit);
-
+    
     // Look for old versions in the package directory
     let package_dir = format!(
         "{}/.local/share/gitpkg/{}",
         env::var("HOME").unwrap(),
         pkg_key
     );
-
+    
     if let Ok(entries) = fs::read_dir(&package_dir) {
         let mut removed_count = 0;
         for entry in entries.flatten() {
@@ -1090,7 +1285,7 @@ fn clean(package: &str) {
                 }
             }
         }
-
+        
         if removed_count > 0 {
             println!("Removed {} old version(s)", removed_count);
         } else {
@@ -1101,9 +1296,9 @@ fn clean(package: &str) {
 
 fn clean_all() {
     println!("Cleaning all temp files and old versions...");
-
+    
     let gitpkg_dir = format!("{}/.local/share/gitpkg", env::var("HOME").unwrap());
-
+    
     // Clean all temp directories
     let temp_dir = Path::new(&gitpkg_dir).join("temp");
     if temp_dir.exists() {
@@ -1116,63 +1311,55 @@ fn clean_all() {
             Err(e) => eprintln!("Failed to remove temp directory: {}", e),
         }
     }
-
+    
     // Get list of all installed packages
     let packages = read_package_list();
-
+    
     if packages.is_empty() {
         println!("No packages installed");
         return;
     }
-
+    
     println!("Cleaning old versions for {} package(s)...", packages.len());
-
+    
     for (package, _) in packages {
         println!("\n--- Cleaning {} ---", package);
         clean(&package);
     }
-
+    
     println!("\nCleanup complete!");
 }
 
 fn list() {
     let packages = read_package_list();
-
+    
     if packages.is_empty() {
         println!("No packages installed");
         return;
     }
-
+    
     println!("Installed packages:");
     println!("{:-<60}", "");
-
+    
     for (package, info_path) in packages.iter() {
         // Read the info file to get details
         if let Ok(content) = fs::read_to_string(info_path) {
             if let Ok(info) = toml::from_str::<toml::Value>(&content) {
-                let commit = info
-                    .get("latest_commit")
+                let commit = info.get("latest_commit")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let build_sys = info
-                    .get("build_system")
+                let build_sys = info.get("build_system")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let timestamp = info
-                    .get("timestamp")
+                let timestamp = info.get("timestamp")
                     .and_then(|v| v.as_str())
                     .unwrap_or("unknown");
-                let supplier = info
-                    .get("supplier")
+                let supplier = info.get("supplier")
                     .and_then(|v| v.as_str())
                     .unwrap_or("github.com");
-
+                
                 println!("Package:    {}", package);
-                println!(
-                    "  Commit:   {} ({})",
-                    &commit[..commit.len().min(8)],
-                    commit
-                );
+                println!("  Commit:   {} ({})", &commit[..commit.len().min(8)], commit);
                 println!("  Build:    {}", build_sys);
                 println!("  Supplier: {}", supplier);
                 println!("  Installed: {}", timestamp);
@@ -1188,25 +1375,22 @@ fn list() {
             println!();
         }
     }
-
+    
     println!("{:-<60}", "");
     println!("Total: {} package(s)", packages.len());
 }
 
 fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
     let (user, repo) = parse_pkg(package);
-
+    
     // Find all matching packages
     let matches = find_matching_packages(user, repo);
-
+    
     if matches.is_empty() {
-        eprintln!(
-            "Package {}/{} is not installed. Use 'install' instead.",
-            user, repo
-        );
+        eprintln!("Package {}/{} is not installed. Use 'install' instead.", user, repo);
         return;
     }
-
+    
     let (pkg_key, stored_supplier, info_path) = if matches.len() > 1 && supplier.is_none() {
         // Multiple packages found and no supplier specified, prompt user
         match prompt_package_selection(&matches) {
@@ -1222,17 +1406,14 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         match matches.iter().find(|(_, s, _)| s == supplier_str) {
             Some(m) => m.clone(),
             None => {
-                eprintln!(
-                    "Package {}/{} from {} is not installed",
-                    user, repo, supplier_str
-                );
+                eprintln!("Package {}/{} from {} is not installed", user, repo, supplier_str);
                 return;
             }
         }
     } else {
         matches[0].clone()
     };
-
+    
     // Read current info
     let info_content = match fs::read_to_string(&info_path) {
         Ok(c) => c,
@@ -1241,7 +1422,7 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
             return;
         }
     };
-
+    
     let info: toml::Value = match toml::from_str(&info_content) {
         Ok(v) => v,
         Err(e) => {
@@ -1249,7 +1430,7 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
             return;
         }
     };
-
+    
     let current_commit = match info.get("latest_commit").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => {
@@ -1257,31 +1438,28 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
             return;
         }
     };
-
+    
     // Use provided supplier or stored supplier
     let supplier_to_use = supplier.unwrap_or(&stored_supplier);
-
-    println!(
-        "Checking for updates to {} from {}...",
-        pkg_key, supplier_to_use
-    );
+    
+    println!("Checking for updates to {} from {}...", pkg_key, supplier_to_use);
     println!("Current commit: {}", current_commit);
-
+    
     // Clone to temp to get latest commit
     let url = build_git_url(user, repo, Some(supplier_to_use));
     let path = temp_path(user, repo);
-
+    
     if Path::new(&path).exists() {
         fs::remove_dir_all(&path).unwrap();
     }
-
+    
     let mut clone_cmd = Command::new("git");
     clone_cmd.arg("clone").arg(&url).arg(&path);
     if !run_cmd(clone_cmd, verbose) {
         eprintln!("Git clone failed");
         return;
     }
-
+    
     let latest_commit = match get_commit_hash(&path) {
         Some(c) => c,
         None => {
@@ -1290,82 +1468,38 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
             return;
         }
     };
-
+    
     println!("Latest commit:  {}", latest_commit);
-
+    
     if current_commit == latest_commit {
         println!("{} is already up to date!", pkg_key);
         let _ = fs::remove_dir_all(&path);
         return;
     }
-
+    
     println!("Update available! Building new version...");
-
+    
     // Build the new version (this will create a new install path with the new commit hash)
     build(user, repo, verbose, Some(supplier_to_use));
-
-    println!(
-        "Successfully upgraded {} from {} to {}",
-        pkg_key,
-        &current_commit[..8],
-        &latest_commit[..8]
-    );
+    
+    println!("Successfully upgraded {} from {} to {}", pkg_key, &current_commit[..8], &latest_commit[..8]);
 }
 
 fn upgrade_all(verbose: bool) {
     let packages = read_package_list();
-
+    
     if packages.is_empty() {
         println!("No packages installed");
         return;
     }
-
+    
     println!("Found {} installed package(s)", packages.len());
-
-    for (pkg_key, info_path) in packages.iter() {
-        println!("\n--- Upgrading {} ---", pkg_key);
-
-        // Read info file to get user/repo/supplier
-        let info_content = match fs::read_to_string(info_path) {
-            Ok(c) => c,
-            Err(_) => {
-                eprintln!("Failed to read info for {}, skipping", pkg_key);
-                continue;
-            }
-        };
-
-        let info: toml::Value = match toml::from_str(&info_content) {
-            Ok(v) => v,
-            Err(_) => {
-                eprintln!("Failed to parse info for {}, skipping", pkg_key);
-                continue;
-            }
-        };
-
-        let user = match info.get("user").and_then(|v| v.as_str()) {
-            Some(u) => u,
-            None => {
-                eprintln!("No user in info for {}, skipping", pkg_key);
-                continue;
-            }
-        };
-
-        let repo = match info.get("repo").and_then(|v| v.as_str()) {
-            Some(r) => r,
-            None => {
-                eprintln!("No repo in info for {}, skipping", pkg_key);
-                continue;
-            }
-        };
-
-        let supplier = info
-            .get("supplier")
-            .and_then(|v| v.as_str())
-            .unwrap_or("github.com");
-
-        upgrade(&format!("{}/{}", user, repo), verbose, Some(supplier));
+    
+    for package in packages.keys() {
+        println!("\n--- Upgrading {} ---", package);
+        upgrade(package, verbose, None); // None means use stored supplier
     }
-
+    
     println!("\nAll packages checked for updates!");
 }
 
