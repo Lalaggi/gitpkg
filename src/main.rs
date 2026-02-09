@@ -10,7 +10,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "Usage: gitpkg <install|remove|clean|list|upgrade> [args] [-v] [--supplier <domain>]"
+            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|help> [args] [-v] [--supplier <domain>]"
         );
         std::process::exit(1);
     }
@@ -97,6 +97,24 @@ fn main() {
                 };
                 upgrade(&target, verbose, supplier.as_deref());
             }
+        }
+        "help" | "-h" | "--help" => {
+            println!("gitpkg — minimal git-based package manager");
+            println!();
+            println!("Usage: gitpkg <command> [args] [-v] [--supplier <domain>]");
+            println!();
+            println!("Commands:");
+            println!("  install <user>/<repo>       Install a package");
+            println!("  remove <user>/<repo>        Remove a package");
+            println!("  clean <user>/<repo>|all     Remove old versions or all");
+            println!("  list                        List installed packages");
+            println!("  upgrade [<pkg>|all]         Upgrade package or all (defaults to all)");
+            println!("  update [<pkg>|all]          Alias for upgrade (warns)");
+            println!("  versions <user>/<repo>      List installed versions for a package");
+            println!("  version <user>/<repo>       Alias for versions (warns)");
+            println!("  goto <user>/<repo>          Print path to installed package (or spawn shell with -s)");
+            println!("  help                        Show this help");
+            return;
         }
         "update" => {
             // Alias for upgrade - show a warning recommending 'upgrade'
