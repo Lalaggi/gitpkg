@@ -46,6 +46,20 @@ cp "target/release/$PROJECT" "$INSTALL_DIR/bin/"
 echo "Running gitpkg to install itself..."
 "$INSTALL_DIR/bin/$PROJECT" install "$USER/$PROJECT" --supplier codeberg.org
 
+# Install bash completion script to user data dir (if present in repo)
+COMPLETION_SRC="$CACHE_DIR/gitpkg-completion.sh"
+if [ -f "$COMPLETION_SRC" ]; then
+  DEST_DIR="$HOME/.local/share/gitpkg"
+  mkdir -p "$DEST_DIR"
+  cp "$COMPLETION_SRC" "$DEST_DIR/gitpkg-completion.sh"
+  chmod +x "$DEST_DIR/gitpkg-completion.sh"
+  # Add source line to ~/.bashrc if not already present
+  if ! grep -Fq "source \$HOME/.local/share/gitpkg/gitpkg-completion.sh" "$HOME/.bashrc" 2>/dev/null; then
+    echo "source \$HOME/.local/share/gitpkg/gitpkg-completion.sh" >> "$HOME/.bashrc"
+    echo "Appended completion source to ~/.bashrc"
+  fi
+fi
+
 # 6. Cleanup
 echo "Cleaning up cache directory..."
 rm -rf "$CACHE_DIR"
