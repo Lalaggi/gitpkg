@@ -604,6 +604,172 @@ fn install_data_files(
     installed
 }
 
+/// Create compatibility symlinks for data files in standard user data locations
+/// to help GTK/GLib applications that expect resources in ~/.local/share/<app>
+#[cfg(unix)]
+fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
+    use std::os::unix::fs as unix_fs;
+
+    let mut created = Vec::new();
+
+    // Symlink ~/.local/share/<repo> -> <install_path>/share/<repo>
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return created,
+    };
+
+    let app_share_dir = install_path.join("share").join(repo);
+    if app_share_dir.exists() {
+        let local_share_app = Path::new(&home).join(".local/share").join(repo);
+
+        // Only create if it doesn't already exist to avoid clobbering real data
+        if !local_share_app.exists() {
+            if let Err(e) = fs::create_dir_all(
+                local_share_app
+                    .parent()
+                    .unwrap_or(&Path::new(&home).join(".local/share")),
+            ) {
+                eprintln!(
+                    "Failed to prepare directory for data symlink {}: {}",
+                    local_share_app.display(),
+                    e
+                );
+            } else if let Err(e) = unix_fs::symlink(&app_share_dir, &local_share_app) {
+                eprintln!(
+                    "Failed to create data symlink {} -> {}: {}",
+                    local_share_app.display(),
+                    app_share_dir.display(),
+                    e
+                );
+            } else {
+                println!(
+                    "Created data symlink: {} -> {}",
+                    local_share_app.display(),
+                    app_share_dir.display()
+                );
+                created.push(local_share_app);
+            }
+        }
+    }
+
+    created
+}
+
+#[cfg(not(unix))]
+fn create_data_symlinks(_install_path: &Path, _repo: &str) -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Symlink desktop files from the package into ~/.local/share/applications/gitpkg
+/// so that the desktop environment can discover them.
+#[cfg(unix)]
+fn create_desktop_symlinks(install_path: &Path, pkg_key: &str) -> Vec<PathBuf> {
+    use std::os::unix::fs as unix_fs;
+
+    let mut created = Vec::new();
+
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return created,
+    };
+
+    let src_dir = install_path.join("share").join("applications");
+    if !src_dir.exists() {
+        return created;
+    }
+
+    let dest_dir = Path::new(&home)
+        .join(".local/share/applications")
+        .join("gitpkg");
+
+    if let Err(e) = fs::create_dir_all(&dest_dir) {
+        eprintln!(
+            "Failed to create gitpkg applications directory {}: {}",
+            dest_dir.display(),
+            e
+        );
+        return created;
+    }
+
+    let safe_pkg = pkg_key.replace('/', "_");
+
+    if let Ok(entries) = fs::read_dir(&src_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e != "desktop")
+                .unwrap_or(true)
+            {
+                continue;
+            }
+
+            let base = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("app.desktop");
+            let dest_path = dest_dir.join(format!("gitpkg.{}.{}", safe_pkg, base));
+
+            // Avoid overwriting existing files we don't own
+            if dest_path.exists() {
+                continue;
+            }
+
+            if let Err(e) = unix_fs::symlink(&path, &dest_path) {
+                eprintln!(
+                    "Failed to create desktop symlink {} -> {}: {}",
+                    dest_path.display(),
+                    path.display(),
+                    e
+                );
+            } else {
+                println!(
+                    "Created desktop symlink: {} -> {}",
+                    dest_path.display(),
+                    path.display()
+                );
+                created.push(dest_path);
+            }
+        }
+    }
+
+    created
+}
+
+#[cfg(not(unix))]
+fn create_desktop_symlinks(_install_path: &Path, _pkg_key: &str) -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// Refresh the desktop database for user applications, if supported.
+fn refresh_desktop_database() {
+    #[cfg(unix)]
+    {
+        if !is_installed("update-desktop-database") {
+            return;
+        }
+
+        let home = match env::var("HOME") {
+            Ok(h) => h,
+            Err(_) => return,
+        };
+
+        let apps_dir = Path::new(&home).join(".local/share/applications");
+        let _ = Command::new("update-desktop-database")
+            .arg(&apps_dir)
+            .status();
+    }
+
+    #[cfg(not(unix))]
+    {
+        // No-op on non-Unix platforms
+    }
+}
+
 /// Recursively copy directory
 fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
     fs::create_dir_all(&dst)?;
@@ -709,6 +875,67 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
 
     // Prompt user to select if multiple found
     prompt_executable_selection(&all_executables)
+}
+
+/// Find the primary installed executable under <install_path>/bin.
+fn find_installed_executable(install_path: &Path, repo: &str) -> Option<PathBuf> {
+    let bin_dir = install_path.join("bin");
+    if !bin_dir.exists() {
+        return None;
+    }
+
+    // Preferred names to match
+    let mut prefs = vec![repo.to_string(), repo.to_lowercase()];
+
+    // Gather other filenames present
+    if let Ok(entries) = fs::read_dir(&bin_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = fs::metadata(&p) {
+                        if meta.permissions().mode() & 0o111 == 0 {
+                            continue;
+                        }
+                    }
+                }
+                if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+                    prefs.push(name.to_string());
+                }
+            }
+        }
+    }
+
+    // Try preferences in order
+    for name in prefs {
+        let candidate = bin_dir.join(&name);
+        if candidate.exists() && candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    // Fallback: first executable file found
+    if let Ok(entries) = fs::read_dir(&bin_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.is_file() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(meta) = fs::metadata(&p) {
+                        if meta.permissions().mode() & 0o111 == 0 {
+                            continue;
+                        }
+                    }
+                }
+                return Some(p);
+            }
+        }
+    }
+
+    None
 }
 
 fn list_file_path() -> String {
@@ -1353,6 +1580,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
     let commit = get_commit_hash(&temp).unwrap_or_else(|| "unknown".to_string());
     let supplier_domain = supplier.unwrap_or("github.com");
     let install_path = install_root(user, repo, &commit, supplier_domain);
+    let pkg_key = get_package_key(user, repo, supplier_domain);
     fs::create_dir_all(&install_path).unwrap();
 
     let bs = match detect_build_system(&temp) {
@@ -1396,16 +1624,33 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
             println!("Installed {} data file(s)", data_files.len());
         }
 
+        // Create compatibility symlinks for data directories in ~/.local/share
+        let data_symlinks = if !data_files.is_empty() {
+            create_data_symlinks(Path::new(&install_path), repo)
+        } else {
+            Vec::new()
+        };
+
         if bs != "npm" {
             let _ = fs::remove_dir_all(&temp);
         }
 
-        let exe_path = Path::new(&install_path).join("bin").join(repo);
+        // Determine actual installed executable (prefer real filename over repo)
+        let bin_dir = Path::new(&install_path).join("bin");
+        let exe_path = match find_installed_executable(Path::new(&install_path), repo) {
+            Some(p) => p,
+            None => Path::new(&install_path).join("bin").join(repo),
+        };
+        let exe_name = exe_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(repo)
+            .to_string();
 
         println!("Creating symlink to /usr/bin (requires sudo)...");
         let sudo_auth = Command::new("sudo").arg("-v").status();
 
-        let symlink_path = Path::new("/usr/bin").join(repo);
+        let symlink_path = Path::new("/usr/bin").join(&exe_name);
 
         let symlink_created = if sudo_auth.is_ok() && sudo_auth.unwrap().success() {
             let _ = Command::new("sudo")
@@ -1446,19 +1691,27 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
             // Create wrapper script
             let wrapper_path = Path::new(&install_path)
                 .join("bin")
-                .join(format!("{}-wrapper", repo));
+                .join(format!("{}-wrapper", exe_name));
             let gresource_path = Path::new(&install_path).join("share").join(repo);
+            let schema_dir = Path::new(&install_path)
+                .join("share")
+                .join("glib-2.0")
+                .join("schemas");
 
             let wrapper_content = format!(
-                r#"#!/bin/bash
+            r#"#!/bin/bash
 # Wrapper for {} - sets up resource paths
+export GITPKG_PACKAGE_ROOT="{}"
 export GRESOURCE_PATH="{}:$GRESOURCE_PATH"
 export XDG_DATA_DIRS="{}:$XDG_DATA_DIRS"
+export GSETTINGS_SCHEMA_DIR="{}:$GSETTINGS_SCHEMA_DIR"
 exec {} "$@"
 "#,
                 repo,
+                install_path,
                 gresource_path.display(),
                 Path::new(&install_path).join("share").display(),
+                schema_dir.display(),
                 exe_path.display()
             );
 
@@ -1496,7 +1749,7 @@ exec {} "$@"
 
             let local_bin = Path::new(&env::var("HOME").unwrap()).join(".local/bin");
             fs::create_dir_all(&local_bin).unwrap();
-            let local_symlink = local_bin.join(repo);
+            let local_symlink = local_bin.join(&exe_name);
             let _ = fs::remove_file(&local_symlink);
 
             let target = if needs_wrapper {
@@ -1531,7 +1784,7 @@ exec {} "$@"
         } else {
             Path::new(&env::var("HOME").unwrap())
                 .join(".local/bin")
-                .join(repo)
+                .join(&exe_name)
                 .to_str()
                 .unwrap()
                 .to_string()
@@ -1563,6 +1816,9 @@ exec {} "$@"
             desktop_path = Some(desktop_file_dst.to_str().unwrap().to_string());
         }
 
+        // Symlink any desktop files from the package into ~/.local/share/applications/gitpkg
+        let desktop_symlinks = create_desktop_symlinks(Path::new(&install_path), &pkg_key);
+
         write_info(
             user,
             repo,
@@ -1574,7 +1830,12 @@ exec {} "$@"
             desktop_path.as_deref(),
             supplier_domain,
             !data_files.is_empty(), // Track if package has data files
+            &data_symlinks,
+            &desktop_symlinks,
         );
+
+        // Update the desktop database so new launchers are visible
+        refresh_desktop_database();
 
         println!("Metadata written to info.gitpkg");
     } else {
@@ -1593,6 +1854,8 @@ fn write_info(
     desktop_path: Option<&str>,
     supplier: &str,
     has_data_files: bool,
+    data_symlinks: &[PathBuf],
+    desktop_symlinks: &[PathBuf],
 ) {
     use chrono::Utc;
 
@@ -1627,6 +1890,22 @@ fn write_info(
         supplier,
         has_data_files
     );
+
+    if !data_symlinks.is_empty() {
+        toml_data.push_str("data_symlinks = [\n");
+        for p in data_symlinks {
+            toml_data.push_str(&format!("  \"{}\",\n", p.display()));
+        }
+        toml_data.push_str("]\n");
+    }
+
+    if !desktop_symlinks.is_empty() {
+        toml_data.push_str("desktop_symlinks = [\n");
+        for p in desktop_symlinks {
+            toml_data.push_str(&format!("  \"{}\",\n", p.display()));
+        }
+        toml_data.push_str("]\n");
+    }
 
     if let Some(dp) = desktop_path {
         toml_data.push_str(&format!("desktop_file = \"{}\"\n", dp));
@@ -1703,6 +1982,40 @@ fn remove(package: &str) {
             match fs::remove_file(desktop_path) {
                 Ok(_) => println!("Removed desktop file: {}", desktop_path),
                 Err(e) => eprintln!("Failed to remove desktop file {}: {}", desktop_path, e),
+            }
+        }
+    }
+
+    // Remove any data symlinks we created (e.g. in ~/.local/share)
+    if let Some(data_symlinks) = info.get("data_symlinks").and_then(|v| v.as_array()) {
+        for entry in data_symlinks {
+            if let Some(path_str) = entry.as_str() {
+                let p = Path::new(path_str);
+                if p.exists() {
+                    match fs::remove_file(p) {
+                        Ok(_) => println!("Removed data symlink: {}", p.display()),
+                        Err(e) => eprintln!("Failed to remove data symlink {}: {}", p.display(), e),
+                    }
+                }
+            }
+        }
+    }
+
+    // Remove any desktop symlinks we created under ~/.local/share/applications/gitpkg
+    if let Some(desktop_symlinks) = info.get("desktop_symlinks").and_then(|v| v.as_array()) {
+        for entry in desktop_symlinks {
+            if let Some(path_str) = entry.as_str() {
+                let p = Path::new(path_str);
+                if p.exists() {
+                    match fs::remove_file(p) {
+                        Ok(_) => println!("Removed desktop symlink: {}", p.display()),
+                        Err(e) => eprintln!(
+                            "Failed to remove desktop symlink {}: {}",
+                            p.display(),
+                            e
+                        ),
+                    }
+                }
             }
         }
     }
