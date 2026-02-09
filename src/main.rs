@@ -2351,8 +2351,10 @@ fn clean_all() {
     }
 
     println!("Cleaning old versions for {} package(s)...", packages.len());
-
-    for (package, _) in packages {
+    // Iterate packages in alphabetical order for consistent output
+    let mut keys: Vec<_> = packages.keys().cloned().collect();
+    keys.sort();
+    for package in keys {
         println!("\n--- Cleaning {} ---", package);
         clean(&package);
     }
@@ -2371,68 +2373,73 @@ fn list() {
     println!("Installed packages:");
     println!("{:-<60}", "");
 
-    for (package, info_path) in packages.iter() {
-        // Read the info file to get details
-        if let Ok(content) = fs::read_to_string(info_path) {
-            if let Ok(info) = toml::from_str::<toml::Value>(&content) {
-                let commit = info
-                    .get("latest_commit")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let build_sys = info
-                    .get("build_system")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let timestamp = info
-                    .get("timestamp")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown");
-                let supplier = info
-                    .get("supplier")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("github.com");
-                let has_data = info
-                    .get("has_data_files")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                // Compute package size: sum of version directories under package dir
-                let mut size_bytes: u64 = 0;
-                if let Some(info_parent) = Path::new(info_path).parent() {
-                    if let Ok(entries) = fs::read_dir(info_parent) {
-                        for entry in entries.flatten() {
-                            let p = entry.path();
-                            let name = entry.file_name().to_string_lossy().to_string();
-                            if name == "info.gitpkg" {
-                                continue;
-                            }
-                            if p.is_dir() {
-                                size_bytes += dir_size_bytes(&p);
+    // Iterate packages in alphabetical order for consistent output
+    let mut keys: Vec<_> = packages.keys().cloned().collect();
+    keys.sort();
+    for package in keys {
+        if let Some(info_path) = packages.get(&package) {
+            // Read the info file to get details
+            if let Ok(content) = fs::read_to_string(info_path) {
+                if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+                    let commit = info
+                        .get("latest_commit")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let build_sys = info
+                        .get("build_system")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let timestamp = info
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let supplier = info
+                        .get("supplier")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("github.com");
+                    let has_data = info
+                        .get("has_data_files")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    // Compute package size: sum of version directories under package dir
+                    let mut size_bytes: u64 = 0;
+                    if let Some(info_parent) = Path::new(info_path).parent() {
+                        if let Ok(entries) = fs::read_dir(info_parent) {
+                            for entry in entries.flatten() {
+                                let p = entry.path();
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if name == "info.gitpkg" {
+                                    continue;
+                                }
+                                if p.is_dir() {
+                                    size_bytes += dir_size_bytes(&p);
+                                }
                             }
                         }
                     }
-                }
 
-                println!("Package:    {}", package);
-                println!(
-                    "  Commit:   {} ({})",
-                    &commit[..commit.len().min(8)],
-                    commit
-                );
-                println!("  Build:    {}", build_sys);
-                println!("  Supplier: {}", supplier);
-                println!("  Data:     {}", if has_data { "yes" } else { "no" });
-                println!("  Installed: {}", timestamp);
-                println!("  Size:      {}", format_mb(size_bytes));
-                println!();
+                    println!("Package:    {}", package);
+                    println!(
+                        "  Commit:   {} ({})",
+                        &commit[..commit.len().min(8)],
+                        commit
+                    );
+                    println!("  Build:    {}", build_sys);
+                    println!("  Supplier: {}", supplier);
+                    println!("  Data:     {}", if has_data { "yes" } else { "no" });
+                    println!("  Installed: {}", timestamp);
+                    println!("  Size:      {}", format_mb(size_bytes));
+                    println!();
+                } else {
+                    println!("Package:    {}", package);
+                    println!("  (Failed to read info)");
+                    println!();
+                }
             } else {
                 println!("Package:    {}", package);
-                println!("  (Failed to read info)");
+                println!("  (Info file not found)");
                 println!();
             }
-        } else {
-            println!("Package:    {}", package);
-            println!("  (Info file not found)");
-            println!();
         }
     }
 
@@ -2681,9 +2688,12 @@ fn upgrade_all(verbose: bool) {
 
     println!("Found {} installed package(s)", packages.len());
 
-    for package in packages.keys() {
+    // Iterate packages in alphabetical order for consistent output
+    let mut keys: Vec<_> = packages.keys().cloned().collect();
+    keys.sort();
+    for package in keys {
         println!("\n--- Upgrading {} ---", package);
-        upgrade(package, verbose, None); // None means use stored supplier
+        upgrade(&package, verbose, None); // None means use stored supplier
     }
 
     println!("\nAll packages checked for updates!");
