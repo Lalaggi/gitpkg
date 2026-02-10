@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     env,
     fs::{self},
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -1243,9 +1244,7 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>) {
     }
 
     println!("Cloning {} from {} into {}", package, supplier_domain, path);
-    let mut clone_cmd = Command::new("git");
-    clone_cmd.arg("clone").arg(&url).arg(&path);
-    if !run_cmd(clone_cmd, verbose) {
+    if !run_git_clone_with_progress(&url, &path, verbose) {
         eprintln!("Git clone failed");
         return;
     }
@@ -1367,7 +1366,12 @@ fn build_make(
     match find_built_executable(Path::new(temp), repo, "make") {
         Some(exe_path) => {
             println!("Found executable: {}", exe_path);
-            let dest = bin_dir.join(repo);
+            // Preserve the original executable name instead of renaming to the repo
+            let exe_name = Path::new(&exe_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(repo);
+            let dest = bin_dir.join(exe_name);
             fs::copy(&exe_path, &dest).unwrap();
             #[cfg(unix)]
             {
@@ -1442,7 +1446,12 @@ fn build_cmake(
         match find_built_executable(&build_dir, repo, "cmake") {
             Some(built_exe) => {
                 fs::create_dir_all(&bin_dir).unwrap();
-                let dest = bin_dir.join(repo);
+                // Preserve the original executable name instead of renaming to the repo
+                let exe_name = Path::new(&built_exe)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or(repo);
+                let dest = bin_dir.join(exe_name);
                 fs::copy(&built_exe, &dest).unwrap();
                 #[cfg(unix)]
                 {
@@ -2815,9 +2824,7 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         fs::remove_dir_all(&path).unwrap();
     }
 
-    let mut clone_cmd = Command::new("git");
-    clone_cmd.arg("clone").arg(&url).arg(&path);
-    if !run_cmd(clone_cmd, verbose) {
+    if !run_git_clone_with_progress(&url, &path, verbose) {
         eprintln!("Git clone failed");
         return;
     }
@@ -2882,4 +2889,95 @@ fn run_cmd(mut cmd: Command, verbose: bool) -> bool {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
     cmd.status().map(|s| s.success()).unwrap_or(false)
+}
+
+// Specialized helper for `git clone` that shows a simple progress bar in non-verbose mode.
+fn run_git_clone_with_progress(url: &str, path: &str, verbose: bool) -> bool {
+    if verbose {
+        let mut cmd = Command::new("git");
+        cmd.arg("clone").arg(url).arg(path);
+        return run_cmd(cmd, true);
+    }
+
+    let mut child = match Command::new("git")
+        .arg("clone")
+        .arg(url)
+        .arg(path)
+        .arg("--progress")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to start git clone: {}", e);
+            return false;
+        }
+    };
+
+    let stderr = match child.stderr.take() {
+        Some(s) => s,
+        None => {
+            eprintln!("Failed to capture git stderr");
+            return false;
+        }
+    };
+
+    let mut reader = BufReader::new(stderr);
+    let mut buf: Vec<u8> = Vec::new();
+    let mut last_percent: u8 = 0;
+
+    // Read progress output chunk by chunk, using '\r' which git uses for progress updates.
+    loop {
+        buf.clear();
+
+        // Read until a carriage return or EOF.
+        match reader.read_until(b'\r', &mut buf) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        let line = match String::from_utf8(buf.clone()) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+
+        // git writes progress to stderr in lines like:
+        // "Receiving objects:  42% (123/456), 1.23 MiB | 1.23 MiB/s"
+        if let Some(p_idx) = line.find('%') {
+            let before = &line[..p_idx];
+            if let Some(start) = before.rfind(' ') {
+                let num_str = before[start..].trim();
+                if let Ok(p) = num_str.parse::<u8>() {
+                    if p != last_percent {
+                        last_percent = p;
+                        let bar_width = 40;
+                        let filled = (p as usize * bar_width) / 100;
+                        let empty = bar_width - filled;
+                        let bar = format!(
+                            "[{}{}]",
+                            "#".repeat(filled),
+                            " ".repeat(empty)
+                        );
+                        print!("\rCloning repository {} {}", bar, format!("{:3}%", p));
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            }
+        }
+    }
+
+    // Finish the progress line with a newline.
+    if last_percent > 0 {
+        println!();
+    }
+
+    match child.wait() {
+        Ok(status) => status.success(),
+        Err(e) => {
+            eprintln!("git clone failed to complete: {}", e);
+            false
+        }
+    }
 }
