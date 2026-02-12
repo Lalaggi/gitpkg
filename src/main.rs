@@ -230,8 +230,10 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
     // Priority order: Universal build systems first, then language-specific
     for (file, sys) in [
         // Universal build systems (higher priority)
-        ("Makefile", "make"),
+        // Prefer CMake over plain Make when both are present,
+        // since many modern projects (e.g. Neovim) drive CMake via Make.
         ("CMakeLists.txt", "cmake"),
+        ("Makefile", "make"),
         ("meson.build", "meson"),
         ("mason.toml", "mason"),
         // Language-specific build systems (lower priority)
@@ -485,6 +487,57 @@ fn find_all_executables_recursive(dir: &Path) -> Vec<String> {
 
     search_dir(dir, &mut executables);
     executables
+}
+
+/// For Make-based projects, run `make -n install` to see where it *plans* to
+/// place build artifacts, and derive likely directories from that output.
+fn analyze_make_install_dirs(build_dir: &Path) -> Option<Vec<PathBuf>> {
+    use std::process::Command;
+
+    let output = Command::new("make")
+        .arg("-n")
+        .arg("install")
+        .current_dir(build_dir)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Very lightweight heuristics: if the dry-run mentions these path segments,
+    // add the corresponding directories under the build root, biased by
+    // typical layouts seen in complex projects like Neovim.
+    if text.contains("build/bin") {
+        dirs.push(build_dir.join("build").join("bin"));
+    }
+    if text.contains(" build") || text.contains("build/") {
+        dirs.push(build_dir.join("build"));
+    }
+    if text.contains(" bin") || text.contains("bin/") {
+        dirs.push(build_dir.join("bin"));
+    }
+    if text.contains("usr/bin") {
+        dirs.push(build_dir.join("usr").join("bin"));
+    }
+    if text.contains("usr/") {
+        dirs.push(build_dir.join("usr"));
+    }
+
+    // Deduplicate while preserving order
+    dirs.dedup();
+    if dirs.is_empty() {
+        None
+    } else {
+        Some(dirs)
+    }
 }
 
 fn prompt_executable_selection(executables: &[String]) -> Option<String> {
@@ -903,15 +956,33 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         ];
     }
 
-    // Search for executables in common build output directories
-    let search_dirs = vec![
-        build_dir.to_path_buf(),
+    // Determine search directories, with a bias towards typical install/build locations.
+    let mut search_dirs: Vec<PathBuf> = Vec::new();
+
+    // For plain Make-based projects, try to learn likely install/build dirs from
+    // a dry-run of `make install` (e.g. Neovim drives CMake this way).
+    if build_system == "make" {
+        if let Some(mut hinted) = analyze_make_install_dirs(build_dir) {
+            search_dirs.append(&mut hinted);
+        }
+    }
+
+    // Always add common locations, preferring build/bin-style dirs first.
+    for dir in [
+        build_dir.join("build").join("bin"),
         build_dir.join("bin"),
         build_dir.join("build"),
+        build_dir.join("usr").join("bin"),
+        build_dir.join("usr"),
+        build_dir.to_path_buf(),
         build_dir.join("out"),
         build_dir.join("target"),
         build_dir.join("src"), // Common for meson projects
-    ];
+    ] {
+        if !search_dirs.contains(&dir) {
+            search_dirs.push(dir);
+        }
+    }
 
     // First, try to find executables with expected names
     for dir in &search_dirs {
@@ -947,7 +1018,12 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         return None;
     }
 
-    // Prompt user to select if multiple found
+    // If there's exactly one candidate, just use it.
+    if all_executables.len() == 1 {
+        return Some(all_executables[0].clone());
+    }
+
+    // Otherwise, fall back to interactive selection.
     prompt_executable_selection(&all_executables)
 }
 
