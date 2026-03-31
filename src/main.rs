@@ -778,34 +778,61 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
         if let Err(e) = fs::create_dir_all(&user_icons_dir) {
             eprintln!("Failed to create user icons directory: {}", e);
         } else {
-            // Copy icon contents to hicolor (icons need to be copied, not symlinked, for GTK to find them)
+            // Copy icon directory contents to hicolor
+            // Icons need proper subdirectory structure (e.g., 48x48/apps, scalable/apps)
             if let Ok(entries) = fs::read_dir(&app_icons_dir) {
                 for entry in entries.flatten() {
                     let src = entry.path();
-                    if src.is_dir() {
-                        // e.g., 48x48, 64x64, scalable
-                        let dest = user_icons_dir.join(src.file_name().unwrap());
-                        if !dest.exists() {
-                            if let Err(e) = copy_dir_all(&src, &dest) {
-                                eprintln!("Failed to copy icons to {}: {}", dest.display(), e);
-                            } else {
-                                println!("Installed icons to: {}", dest.display());
-                                created.push(dest);
+                    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+                    // Skip non-directory, non-icon files
+                    if !src.is_dir() {
+                        // Only copy actual icon files (svg, png), skip build files
+                        if name.ends_with(".svg")
+                            || name.ends_with(".png")
+                            || name.ends_with(".ico")
+                        {
+                            let dest = user_icons_dir.join(name);
+                            if !dest.exists() {
+                                if let Err(e) = fs::copy(&src, &dest) {
+                                    eprintln!("Failed to copy icon {}: {}", dest.display(), e);
+                                } else {
+                                    println!("Installed icon: {}", dest.display());
+                                    created.push(dest);
+                                }
                             }
                         }
-                    } else if src.is_file() {
-                        // Root-level icon files (e.g., app-icon.png)
-                        let dest = user_icons_dir.join(src.file_name().unwrap());
+                        continue;
+                    }
+
+                    // Skip non-icon-theme directories
+                    if name == "hicolor" || name == "Adwaita" || name == "gnome" {
+                        // Copy the entire subdirectory structure
+                        let dest = user_icons_dir.join(name);
                         if !dest.exists() {
-                            if let Err(e) = fs::copy(&src, &dest) {
-                                eprintln!("Failed to copy icon {}: {}", dest.display(), e);
+                            if let Err(e) = copy_dir_all(&src, &dest) {
+                                eprintln!(
+                                    "Failed to copy icon directory {}: {}",
+                                    dest.display(),
+                                    e
+                                );
                             } else {
-                                println!("Installed icon: {}", dest.display());
+                                println!("Installed icon directory: {}", dest.display());
                                 created.push(dest);
                             }
                         }
                     }
                 }
+            }
+
+            // Update icon cache so GTK can find new icons
+            if is_installed("gtk-update-icon-cache") {
+                let _ = Command::new("gtk-update-icon-cache")
+                    .arg("-f")
+                    .arg("-t")
+                    .arg(&user_icons_dir)
+                    .status();
+                println!("Updated icon cache for hicolor");
             }
         }
     }
