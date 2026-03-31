@@ -731,17 +731,16 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
 
     let mut created = Vec::new();
 
-    // Symlink ~/.local/share/<repo> -> <install_path>/share/<repo>
     let home = match env::var("HOME") {
         Ok(h) => h,
         Err(_) => return created,
     };
 
+    // Symlink ~/.local/share/<repo> -> <install_path>/share/<repo>
     let app_share_dir = install_path.join("share").join(repo);
     if app_share_dir.exists() {
         let local_share_app = Path::new(&home).join(".local/share").join(repo);
 
-        // Only create if it doesn't already exist to avoid clobbering real data
         if !local_share_app.exists() {
             if let Err(e) = fs::create_dir_all(
                 local_share_app
@@ -767,6 +766,46 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
                     app_share_dir.display()
                 );
                 created.push(local_share_app);
+            }
+        }
+    }
+
+    // Symlink icons to ~/.local/share/icons/hicolor
+    let app_icons_dir = install_path.join("share/icons");
+    if app_icons_dir.exists() {
+        let user_icons_dir = Path::new(&home).join(".local/share/icons/hicolor");
+
+        if let Err(e) = fs::create_dir_all(&user_icons_dir) {
+            eprintln!("Failed to create user icons directory: {}", e);
+        } else {
+            // Copy icon contents to hicolor (icons need to be copied, not symlinked, for GTK to find them)
+            if let Ok(entries) = fs::read_dir(&app_icons_dir) {
+                for entry in entries.flatten() {
+                    let src = entry.path();
+                    if src.is_dir() {
+                        // e.g., 48x48, 64x64, scalable
+                        let dest = user_icons_dir.join(src.file_name().unwrap());
+                        if !dest.exists() {
+                            if let Err(e) = copy_dir_all(&src, &dest) {
+                                eprintln!("Failed to copy icons to {}: {}", dest.display(), e);
+                            } else {
+                                println!("Installed icons to: {}", dest.display());
+                                created.push(dest);
+                            }
+                        }
+                    } else if src.is_file() {
+                        // Root-level icon files (e.g., app-icon.png)
+                        let dest = user_icons_dir.join(src.file_name().unwrap());
+                        if !dest.exists() {
+                            if let Err(e) = fs::copy(&src, &dest) {
+                                eprintln!("Failed to copy icon {}: {}", dest.display(), e);
+                            } else {
+                                println!("Installed icon: {}", dest.display());
+                                created.push(dest);
+                            }
+                        }
+                    }
+                }
             }
         }
     }
