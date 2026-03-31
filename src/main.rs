@@ -53,7 +53,8 @@ fn main() {
                 eprintln!("Usage: gitpkg goto <user>/<repo> [--shell|-s]");
                 return;
             }
-            let spawn_shell = args.contains(&"--shell".to_string()) || args.contains(&"-s".to_string());
+            let spawn_shell =
+                args.contains(&"--shell".to_string()) || args.contains(&"-s".to_string());
             let target = resolve_self_alias(&args[2]);
             goto(&target, spawn_shell);
         }
@@ -450,32 +451,21 @@ fn find_all_executables_recursive(dir: &Path) -> Vec<String> {
                         search_dir(&path, executables);
                     }
                 } else if path.is_file() {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        if let Ok(metadata) = fs::metadata(&path) {
-                            if metadata.permissions().mode() & 0o111 != 0 {
-                                let filename = path.file_name().unwrap().to_string_lossy();
-                                // Skip scripts and common non-binary executables
-                                if !filename.ends_with(".sh")
-                                    && !filename.ends_with(".py")
-                                    && !filename.ends_with(".pl")
-                                    && !filename.ends_with(".rb")
-                                    && !filename.ends_with(".js")
-                                    && !filename.starts_with(".")
-                                    && !filename.contains("Makefile")
-                                    && !filename.contains("CMake")
-                                {
-                                    executables.push(path.to_string_lossy().to_string());
-                                }
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Ok(metadata) = fs::metadata(&path) {
+                        if metadata.permissions().mode() & 0o111 != 0 {
+                            let filename = path.file_name().unwrap().to_string_lossy();
+                            if !filename.ends_with(".sh")
+                                && !filename.ends_with(".py")
+                                && !filename.ends_with(".pl")
+                                && !filename.ends_with(".rb")
+                                && !filename.ends_with(".js")
+                                && !filename.starts_with(".")
+                                && !filename.contains("Makefile")
+                                && !filename.contains("CMake")
+                            {
+                                executables.push(path.to_string_lossy().to_string());
                             }
-                        }
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        // On non-Unix, check for .exe files
-                        if path.extension().and_then(|s| s.to_str()) == Some("exe") {
-                            executables.push(path.to_string_lossy().to_string());
                         }
                     }
                 }
@@ -680,7 +670,6 @@ fn install_data_files(
 
 /// Create compatibility symlinks for data files in standard user data locations
 /// to help GTK/GLib applications that expect resources in ~/.local/share/<app>
-#[cfg(unix)]
 fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
     use std::os::unix::fs as unix_fs;
 
@@ -729,14 +718,6 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
     created
 }
 
-#[cfg(not(unix))]
-fn create_data_symlinks(_install_path: &Path, _repo: &str) -> Vec<PathBuf> {
-    Vec::new()
-}
-
-/// Symlink desktop files from the package into ~/.local/share/applications/gitpkg
-/// so that the desktop environment can discover them.
-#[cfg(unix)]
 fn create_desktop_symlinks(install_path: &Path, pkg_key: &str) -> Vec<PathBuf> {
     use std::os::unix::fs as unix_fs;
 
@@ -814,34 +795,21 @@ fn create_desktop_symlinks(install_path: &Path, pkg_key: &str) -> Vec<PathBuf> {
     created
 }
 
-#[cfg(not(unix))]
-fn create_desktop_symlinks(_install_path: &Path, _pkg_key: &str) -> Vec<PathBuf> {
-    Vec::new()
-}
-
 /// Refresh the desktop database for user applications, if supported.
 fn refresh_desktop_database() {
-    #[cfg(unix)]
-    {
-        if !is_installed("update-desktop-database") {
-            return;
-        }
-
-        let home = match env::var("HOME") {
-            Ok(h) => h,
-            Err(_) => return,
-        };
-
-        let apps_dir = Path::new(&home).join(".local/share/applications");
-        let _ = Command::new("update-desktop-database")
-            .arg(&apps_dir)
-            .status();
+    if !is_installed("update-desktop-database") {
+        return;
     }
 
-    #[cfg(not(unix))]
-    {
-        // No-op on non-Unix platforms
-    }
+    let home = match env::var("HOME") {
+        Ok(h) => h,
+        Err(_) => return,
+    };
+
+    let apps_dir = Path::new(&home).join(".local/share/applications");
+    let _ = Command::new("update-desktop-database")
+        .arg(&apps_dir)
+        .status();
 }
 
 /// Recursively copy directory
@@ -875,7 +843,11 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         "meson" => {
             let meson_file = build_dir.parent().and_then(|p| {
                 let mf = p.join("meson.build");
-                if mf.exists() { Some(mf) } else { None }
+                if mf.exists() {
+                    Some(mf)
+                } else {
+                    None
+                }
             });
             if let Some(mf) = meson_file {
                 search_names = find_executables_in_meson(&mf, repo);
@@ -884,7 +856,11 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         "cmake" => {
             let cmake_file = build_dir.parent().and_then(|p| {
                 let cf = p.join("CMakeLists.txt");
-                if cf.exists() { Some(cf) } else { None }
+                if cf.exists() {
+                    Some(cf)
+                } else {
+                    None
+                }
             });
             if let Some(cf) = cmake_file {
                 search_names = find_executables_in_cmake(&cf, repo);
@@ -922,18 +898,11 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         for exe_name in &search_names {
             let exe_path = dir.join(exe_name);
             if exe_path.exists() && exe_path.is_file() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(metadata) = fs::metadata(&exe_path) {
-                        if metadata.permissions().mode() & 0o111 != 0 {
-                            return Some(exe_path.to_string_lossy().to_string());
-                        }
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(metadata) = fs::metadata(&exe_path) {
+                    if metadata.permissions().mode() & 0o111 != 0 {
+                        return Some(exe_path.to_string_lossy().to_string());
                     }
-                }
-                #[cfg(not(unix))]
-                {
-                    return Some(exe_path.to_string_lossy().to_string());
                 }
             }
         }
@@ -966,13 +935,10 @@ fn find_installed_executable(install_path: &Path, repo: &str) -> Option<PathBuf>
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_file() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = fs::metadata(&p) {
-                        if meta.permissions().mode() & 0o111 == 0 {
-                            continue;
-                        }
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = fs::metadata(&p) {
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        continue;
                     }
                 }
                 if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
@@ -995,13 +961,10 @@ fn find_installed_executable(install_path: &Path, repo: &str) -> Option<PathBuf>
         for entry in entries.flatten() {
             let p = entry.path();
             if p.is_file() {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Ok(meta) = fs::metadata(&p) {
-                        if meta.permissions().mode() & 0o111 == 0 {
-                            continue;
-                        }
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = fs::metadata(&p) {
+                    if meta.permissions().mode() & 0o111 == 0 {
+                        continue;
                     }
                 }
                 return Some(p);
@@ -1373,13 +1336,10 @@ fn build_make(
                 .unwrap_or(repo);
             let dest = bin_dir.join(exe_name);
             fs::copy(&exe_path, &dest).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&dest).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&dest, perms).unwrap();
-            }
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms).unwrap();
             Some(make_status)
         }
         None => {
@@ -1453,13 +1413,10 @@ fn build_cmake(
                     .unwrap_or(repo);
                 let dest = bin_dir.join(exe_name);
                 fs::copy(&built_exe, &dest).unwrap();
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(&dest).unwrap().permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&dest, perms).unwrap();
-                }
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&dest).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dest, perms).unwrap();
                 Some(install_status)
             }
             None => {
@@ -1618,13 +1575,10 @@ fn build_npm(
                             let wrapper =
                                 format!("#!/usr/bin/env node\nrequire('{}');", src.display());
                             fs::write(&dest, wrapper).unwrap();
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                let mut perms = fs::metadata(&dest).unwrap().permissions();
-                                perms.set_mode(0o755);
-                                fs::set_permissions(&dest, perms).unwrap();
-                            }
+                            use std::os::unix::fs::PermissionsExt;
+                            let mut perms = fs::metadata(&dest).unwrap().permissions();
+                            perms.set_mode(0o755);
+                            fs::set_permissions(&dest, perms).unwrap();
                         } else {
                             fs::copy(&src, &dest).unwrap();
                         }
@@ -1671,13 +1625,10 @@ fn build_gradle(
                         dest_jar.display()
                     );
                     fs::write(&wrapper, script).unwrap();
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        let mut perms = fs::metadata(&wrapper).unwrap().permissions();
-                        perms.set_mode(0o755);
-                        fs::set_permissions(&wrapper, perms).unwrap();
-                    }
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = fs::metadata(&wrapper).unwrap().permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&wrapper, perms).unwrap();
                     break;
                 }
             }
@@ -1694,11 +1645,8 @@ fn build_python(
     verbose: bool,
 ) -> Option<std::process::ExitStatus> {
     use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
 
-    let venv_dir = Path::new(install_path).join("venv");
-    fs::create_dir_all(&venv_dir).ok()?;
-
-    // Choose python binary
     let python_cmd = if is_installed("python3") {
         "python3"
     } else if is_installed("python") {
@@ -1708,34 +1656,24 @@ fn build_python(
         return None;
     };
 
-    println!("Creating virtualenv with {} at {}", python_cmd, venv_dir.display());
-    let mut venv_cmd = Command::new(python_cmd);
-    venv_cmd.arg("-m").arg("venv").arg(&venv_dir);
-    if !verbose {
-        venv_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let venv_status = venv_cmd.status().ok()?;
-    if !venv_status.success() {
-        eprintln!("Failed to create virtualenv");
-        return Some(venv_status);
-    }
+    let temp_path = Path::new(temp);
 
-    let venv_python = venv_dir.join("bin").join("python");
+    // Check for pyproject.toml or setup.py - use pip install . approach
+    let has_pyproject = temp_path.join("pyproject.toml").exists();
+    let has_setup_py = temp_path.join("setup.py").exists();
 
-    // Upgrade pip/setuptools/wheel
-    let mut pip_upgrade = Command::new(&venv_python);
-    pip_upgrade.arg("-m").arg("pip").arg("install").arg("--upgrade").arg("pip").arg("setuptools").arg("wheel");
-    if !verbose {
-        pip_upgrade.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let _ = pip_upgrade.status().ok()?;
-
-    // If requirements.txt exists, install those first
-    let req_file = Path::new(temp).join("requirements.txt");
+    // Install requirements.txt with --break-system-packages if it exists
+    let req_file = temp_path.join("requirements.txt");
     if req_file.exists() {
-        println!("Installing requirements from {}", req_file.display());
-        let mut req_cmd = Command::new(&venv_python);
-        req_cmd.arg("-m").arg("pip").arg("install").arg("-r").arg(&req_file);
+        println!("Installing requirements with --break-system-packages...");
+        let mut req_cmd = Command::new(python_cmd);
+        req_cmd
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--break-system-packages")
+            .arg("-r")
+            .arg(&req_file);
         if !verbose {
             req_cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
@@ -1746,54 +1684,160 @@ fn build_python(
         }
     }
 
-    // Install the package into the venv
-    let mut install_cmd = Command::new(&venv_python);
-    install_cmd.arg("-m").arg("pip").arg("install").arg(".").current_dir(temp);
-    if !verbose {
-        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    // Find the main Python script
+    let main_script = find_main_python_script(temp_path, repo);
+
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).ok()?;
+
+    if let Some((script_name, script_path)) = main_script {
+        // Put the script in its own folder: lib/<repo>/
+        let lib_dir = Path::new(install_path).join("lib").join(repo);
+        fs::create_dir_all(&lib_dir).ok()?;
+
+        let dest_script = lib_dir.join(&script_name);
+        fs::copy(&script_path, &dest_script).ok()?;
+
+        // Ensure script has execute permission
+        let mut perms = fs::metadata(&dest_script).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&dest_script, perms).ok();
+
+        // Ensure script has a shebang
+        if let Ok(content) = fs::read_to_string(&dest_script) {
+            if !content.starts_with("#!") {
+                let new_content = format!("#!/usr/bin/env {}\n{}", python_cmd, content);
+                fs::write(&dest_script, new_content).ok();
+                // Re-apply execute permission after write
+                let mut perms = fs::metadata(&dest_script).unwrap().permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&dest_script, perms).ok();
+            }
+        }
+
+        // Create symlink in bin/ pointing to the script
+        let symlink_path = bin_dir.join(&script_name);
+        let _ = fs::remove_file(&symlink_path);
+        if let Err(e) = std::os::unix::fs::symlink(&dest_script, &symlink_path) {
+            eprintln!("Failed to create symlink: {}", e);
+        } else {
+            println!(
+                "Created symlink: {} -> {}",
+                symlink_path.display(),
+                dest_script.display()
+            );
+        }
+
+        println!(
+            "Installed python script: {} -> {}",
+            symlink_path.display(),
+            dest_script.display()
+        );
+
+        return Some(std::process::ExitStatus::from_raw(0));
+    } else if has_pyproject || has_setup_py {
+        // Fall back to pip install . for proper packages
+        println!("Installing python package with pip...");
+        let mut install_cmd = Command::new(python_cmd);
+        install_cmd
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--break-system-packages")
+            .arg(".");
+        if !verbose {
+            install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let install_status = install_cmd.current_dir(temp).status().ok()?;
+        if !install_status.success() {
+            eprintln!("pip install failed for python package");
+            return Some(install_status);
+        }
+
+        // Find and symlink console scripts from site-packages
+        let site_packages = Command::new(python_cmd)
+            .arg("-c")
+            .arg("import site; print(site.getsitepackages()[0])")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string());
+
+        if let Some(sp) = site_packages {
+            let bin_in_sp = Path::new(&sp).join("..").join("bin");
+            if let Ok(entries) = fs::read_dir(&bin_in_sp) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_file() {
+                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                            // Skip python and pip
+                            if name == "python"
+                                || name.starts_with("python")
+                                || name == "pip"
+                                || name.starts_with("pip")
+                            {
+                                continue;
+                            }
+                            let symlink_path = bin_dir.join(name);
+                            let _ = fs::remove_file(&symlink_path);
+                            let _ = std::os::unix::fs::symlink(&path, &symlink_path);
+                            println!("Linked console script: {}", name);
+                        }
+                    }
+                }
+            }
+        }
+
+        Some(install_status)
+    } else {
+        eprintln!("No python script found (expected main.py, app.py, or <repo>.py)");
+        None
     }
-    let install_status = install_cmd.status().ok()?;
-    if !install_status.success() {
-        eprintln!("pip install failed for python package");
-        return Some(install_status);
+}
+
+fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)> {
+    // Check for common main script names
+    let candidates: Vec<String> = vec![
+        "main.py".to_string(),
+        "app.py".to_string(),
+        "cli.py".to_string(),
+        "run.py".to_string(),
+        "start.py".to_string(),
+        format!("{}.py", repo),
+        "script.py".to_string(),
+        "entrypoint.py".to_string(),
+    ];
+
+    for candidate in &candidates {
+        let path = temp.join(candidate);
+        if path.exists() && path.is_file() {
+            return Some((candidate.clone(), path));
+        }
     }
 
-    // Expose console scripts by creating wrapper scripts in install_path/bin
-    let venv_bin = venv_dir.join("bin");
-    let target_bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&target_bin_dir).ok()?;
-
-    if let Ok(entries) = fs::read_dir(&venv_bin) {
+    // Search for .py files in temp (excluding __pycache__, venv, etc.)
+    if let Ok(entries) = fs::read_dir(temp) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    // skip python and pip executables
-                    if name == "python" || name.starts_with("python") || name == "pip" || name.starts_with("pip") {
-                        continue;
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    if ext == "py" {
+                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        // Skip common non-entry-point files
+                        if !name.starts_with("test_")
+                            && !name.starts_with("_")
+                            && name != "setup.py"
+                            && name != "__init__.py"
+                        {
+                            return Some((name.to_string(), path));
+                        }
                     }
-
-                    let wrapper = target_bin_dir.join(name);
-                    let script = format!(
-                        "#!/bin/bash\n# Autogenerated wrapper for python package {}\nexport GITPKG_PACKAGE_ROOT=\"{}\"\nexec \"{}\" \"$@\"\n",
-                        repo,
-                        install_path,
-                        path.display()
-                    );
-                    if let Err(e) = fs::write(&wrapper, script) {
-                        eprintln!("Failed to write wrapper {}: {}", wrapper.display(), e);
-                        continue;
-                    }
-                    let mut perms = fs::metadata(&wrapper).unwrap().permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&wrapper, perms).ok();
-                    println!("Installed python console script wrapper: {}", wrapper.display());
                 }
             }
         }
     }
 
-    Some(install_status)
+    None
 }
 
 fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
@@ -1956,7 +2000,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
                 .join("schemas");
 
             let wrapper_content = format!(
-            r#"#!/bin/bash
+                r#"#!/bin/bash
 # Wrapper for {} - sets up resource paths
 export GITPKG_PACKAGE_ROOT="{}"
 export GRESOURCE_PATH="{}:$GRESOURCE_PATH"
@@ -1973,13 +2017,10 @@ exec {} "$@"
             );
 
             fs::write(&wrapper_path, wrapper_content).unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&wrapper_path).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&wrapper_path, perms).unwrap();
-            }
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&wrapper_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&wrapper_path, perms).unwrap();
 
             // Update symlink to point to wrapper
             if symlink_created {
@@ -2267,11 +2308,9 @@ fn remove(package: &str) {
                 if p.exists() {
                     match fs::remove_file(p) {
                         Ok(_) => println!("Removed desktop symlink: {}", p.display()),
-                        Err(e) => eprintln!(
-                            "Failed to remove desktop symlink {}: {}",
-                            p.display(),
-                            e
-                        ),
+                        Err(e) => {
+                            eprintln!("Failed to remove desktop symlink {}: {}", p.display(), e)
+                        }
                     }
                 }
             }
@@ -2481,7 +2520,11 @@ fn clean(package: &str) {
         }
 
         if removed_count > 0 {
-            println!("Removed {} old version(s), freed {}", removed_count, format_mb(freed_bytes));
+            println!(
+                "Removed {} old version(s), freed {}",
+                removed_count,
+                format_mb(freed_bytes)
+            );
         } else {
             println!("No old versions to clean");
         }
@@ -2955,11 +2998,7 @@ fn run_git_clone_with_progress(url: &str, path: &str, verbose: bool) -> bool {
                         let bar_width = 40;
                         let filled = (p as usize * bar_width) / 100;
                         let empty = bar_width - filled;
-                        let bar = format!(
-                            "[{}{}]",
-                            "#".repeat(filled),
-                            " ".repeat(empty)
-                        );
+                        let bar = format!("[{}{}]", "#".repeat(filled), " ".repeat(empty));
                         print!("\rCloning repository {} {}", bar, format!("{:3}%", p));
                         let _ = std::io::stdout().flush();
                     }
