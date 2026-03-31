@@ -726,7 +726,8 @@ fn install_data_files(
 
 /// Create compatibility symlinks for data files in standard user data locations
 /// to help GTK/GLib applications that expect resources in ~/.local/share/<app>
-fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
+/// If system_wide is true, also copy icons to /usr/share/icons for system-wide access
+fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> Vec<PathBuf> {
     use std::os::unix::fs as unix_fs;
 
     let mut created = Vec::new();
@@ -770,36 +771,72 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
         }
     }
 
-    // Symlink icons to ~/.local/share/icons/hicolor
+    fn copy_icon_dir(src: &Path, dest: &Path) -> std::io::Result<()> {
+        if let Ok(entries) = fs::read_dir(src) {
+            for entry in entries.flatten() {
+                let sub_src = entry.path();
+                let sub_name = sub_src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                let sub_dest = dest.join(sub_name);
+
+                if sub_src.is_dir() {
+                    fs::create_dir_all(&sub_dest)?;
+                    copy_icon_dir(&sub_src, &sub_dest)?;
+                } else if sub_src.is_file() {
+                    fs::copy(&sub_src, &sub_dest)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Copy icons
     let app_icons_dir = install_path.join("share/icons");
     if app_icons_dir.exists() {
+        // User icons (always)
         let user_icons_dir = Path::new(&home).join(".local/share/icons/hicolor");
 
         if let Err(e) = fs::create_dir_all(&user_icons_dir) {
             eprintln!("Failed to create user icons directory: {}", e);
         } else {
-            // Copy all contents from app's icons directory to user hicolor
             if let Ok(entries) = fs::read_dir(&app_icons_dir) {
                 for entry in entries.flatten() {
                     let src = entry.path();
                     let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-                    // Skip build files
                     if name == "meson.build" || name == "CMakeLists.txt" {
                         continue;
                     }
 
                     if src.is_dir() {
-                        // Copy entire directory (e.g., 48x48, scalable, hicolor, Adwaita)
-                        let dest = user_icons_dir.join(name);
-                        if let Err(e) = copy_dir_all(&src, &dest) {
-                            eprintln!("Failed to copy icon directory {}: {}", dest.display(), e);
-                        } else {
-                            println!("Installed icon directory: {}", dest.display());
-                            created.push(dest);
+                        if let Ok(subentries) = fs::read_dir(&src) {
+                            for subentry in subentries.flatten() {
+                                let sub_src = subentry.path();
+                                let sub_name =
+                                    sub_src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                let dest = user_icons_dir.join(sub_name);
+
+                                if sub_src.is_dir() {
+                                    if let Err(e) = copy_icon_dir(&sub_src, &dest) {
+                                        eprintln!(
+                                            "Failed to copy icon dir {}: {}",
+                                            dest.display(),
+                                            e
+                                        );
+                                    } else {
+                                        println!("Installed icon dir: {}", dest.display());
+                                        created.push(dest);
+                                    }
+                                } else if sub_src.is_file() {
+                                    if let Err(e) = fs::copy(&sub_src, &dest) {
+                                        eprintln!("Failed to copy icon {}: {}", dest.display(), e);
+                                    } else {
+                                        println!("Installed icon: {}", dest.display());
+                                        created.push(dest);
+                                    }
+                                }
+                            }
                         }
                     } else if src.is_file() {
-                        // Copy individual icon files to root of hicolor
                         let dest = user_icons_dir.join(name);
                         if let Err(e) = fs::copy(&src, &dest) {
                             eprintln!("Failed to copy icon {}: {}", dest.display(), e);
@@ -811,7 +848,6 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
                 }
             }
 
-            // Update icon cache so GTK can find new icons
             if is_installed("gtk-update-icon-cache") {
                 let _ = Command::new("gtk-update-icon-cache")
                     .arg("-f")
@@ -819,6 +855,78 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
                     .arg(&user_icons_dir)
                     .status();
                 println!("Updated icon cache for hicolor");
+            }
+        }
+
+        // System-wide icons (if sudo was obtained)
+        if system_wide {
+            let system_icons_dir = Path::new("/usr/share/icons/hicolor");
+            if let Err(e) = fs::create_dir_all(&system_icons_dir) {
+                eprintln!("Failed to create system icons directory: {}", e);
+            } else {
+                if let Ok(entries) = fs::read_dir(&app_icons_dir) {
+                    for entry in entries.flatten() {
+                        let src = entry.path();
+                        let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+
+                        if name == "meson.build" || name == "CMakeLists.txt" {
+                            continue;
+                        }
+
+                        if src.is_dir() {
+                            if let Ok(subentries) = fs::read_dir(&src) {
+                                for subentry in subentries.flatten() {
+                                    let sub_src = subentry.path();
+                                    let sub_name =
+                                        sub_src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                    let dest = system_icons_dir.join(sub_name);
+
+                                    if sub_src.is_dir() {
+                                        if let Err(e) = copy_icon_dir(&sub_src, &dest) {
+                                            eprintln!(
+                                                "Failed to copy system icon dir {}: {}",
+                                                dest.display(),
+                                                e
+                                            );
+                                        } else {
+                                            println!(
+                                                "Installed system icon dir: {}",
+                                                dest.display()
+                                            );
+                                        }
+                                    } else if sub_src.is_file() {
+                                        if let Err(e) = fs::copy(&sub_src, &dest) {
+                                            eprintln!(
+                                                "Failed to copy system icon {}: {}",
+                                                dest.display(),
+                                                e
+                                            );
+                                        } else {
+                                            println!("Installed system icon: {}", dest.display());
+                                        }
+                                    }
+                                }
+                            }
+                        } else if src.is_file() {
+                            let dest = system_icons_dir.join(name);
+                            if let Err(e) = fs::copy(&src, &dest) {
+                                eprintln!("Failed to copy system icon {}: {}", dest.display(), e);
+                            } else {
+                                println!("Installed system icon: {}", dest.display());
+                            }
+                        }
+                    }
+                }
+
+                if is_installed("gtk-update-icon-cache") {
+                    let _ = Command::new("sudo")
+                        .arg("gtk-update-icon-cache")
+                        .arg("-f")
+                        .arg("-t")
+                        .arg(&system_icons_dir)
+                        .status();
+                    println!("Updated system icon cache for hicolor");
+                }
             }
         }
     }
@@ -2149,7 +2257,8 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
         }
 
         // Create compatibility symlinks for data directories in ~/.local/share
-        let data_symlinks = create_data_symlinks(Path::new(&install_path), repo);
+        // Initially copy to user directory, we'll update system-wide if /usr/bin symlink succeeds
+        let data_symlinks = create_data_symlinks(Path::new(&install_path), repo, false);
 
         if bs != "npm" {
             let _ = fs::remove_dir_all(&temp);
@@ -2239,6 +2348,12 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
             eprintln!("Failed to authenticate sudo");
             false
         };
+
+        // If system symlink was created, also copy icons to system location
+        if symlink_created {
+            println!("Copying icons to system location...");
+            let _ = create_data_symlinks(Path::new(&install_path), repo, true);
+        }
 
         // Create wrapper script that sets environment variables for resources
         let needs_wrapper = !data_files.is_empty();
