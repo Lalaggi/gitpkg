@@ -248,28 +248,50 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
         }
     }
 
+    fn is_python_file(path: &Path) -> bool {
+        if !path.is_file() {
+            return false;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy())
+            .unwrap_or_default();
+        if name.starts_with(".") || name == "setup.py" {
+            return false;
+        }
+        let output = Command::new("file")
+            .arg("--mime-type")
+            .arg("-b")
+            .arg(path)
+            .output();
+        if let Ok(o) = output {
+            let mime = String::from_utf8_lossy(&o.stdout);
+            return mime.contains("python");
+        }
+        false
+    }
+
     if let Ok(entries) = fs::read_dir(base) {
         for entry in entries.flatten() {
             let entry_path = entry.path();
-            if !entry_path.is_file() {
-                continue;
+            if entry_path.is_file() && is_python_file(&entry_path) {
+                return Some("python");
             }
-
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(".") || name == "setup.py" {
-                continue;
-            }
-
-            let output = Command::new("file")
-                .arg("--mime-type")
-                .arg("-b")
-                .arg(&entry_path)
-                .output();
-
-            if let Ok(o) = output {
-                let mime = String::from_utf8_lossy(&o.stdout);
-                if mime.contains("python") {
-                    return Some("python");
+            if entry_path.is_dir() {
+                let dir_name = entry_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default();
+                if dir_name.starts_with(".") || dir_name == "__pycache__" || dir_name == "venv" {
+                    continue;
+                }
+                if let Ok(subentries) = fs::read_dir(&entry_path) {
+                    for subentry in subentries.flatten() {
+                        let sub_path = subentry.path();
+                        if sub_path.is_file() && is_python_file(&sub_path) {
+                            return Some("python");
+                        }
+                    }
                 }
             }
         }
