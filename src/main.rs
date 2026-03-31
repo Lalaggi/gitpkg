@@ -1959,24 +1959,6 @@ fn build_python(
 }
 
 fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)> {
-    let candidates: Vec<String> = vec![
-        "main.py".to_string(),
-        "app.py".to_string(),
-        "cli.py".to_string(),
-        "run.py".to_string(),
-        "start.py".to_string(),
-        format!("{}.py", repo),
-        "script.py".to_string(),
-        "entrypoint.py".to_string(),
-    ];
-
-    for candidate in &candidates {
-        let path = temp.join(candidate);
-        if path.exists() && path.is_file() {
-            return Some((candidate.clone(), path));
-        }
-    }
-
     fn is_python_file(path: &Path) -> bool {
         if !path.is_file() {
             return false;
@@ -1993,6 +1975,31 @@ fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)>
         false
     }
 
+    // First, look for a file matching the repo name in the root
+    let repo_name_path = temp.join(repo);
+    if repo_name_path.is_file() && is_python_file(&repo_name_path) {
+        return Some((repo.to_string(), repo_name_path));
+    }
+
+    // Check common script names in root
+    let candidates: Vec<String> = vec![
+        "main.py".to_string(),
+        "app.py".to_string(),
+        "cli.py".to_string(),
+        "run.py".to_string(),
+        "start.py".to_string(),
+        "script.py".to_string(),
+        "entrypoint.py".to_string(),
+    ];
+
+    for candidate in &candidates {
+        let path = temp.join(candidate);
+        if path.exists() && path.is_file() && is_python_file(&path) {
+            return Some((candidate.clone(), path));
+        }
+    }
+
+    // Search root for any python file
     if let Ok(entries) = fs::read_dir(temp) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -2002,8 +2009,18 @@ fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)>
                     .and_then(|n| n.to_str())
                     .unwrap_or("script")
                     .to_string();
+                if name == "setup.py" || name.starts_with("test_") || name.starts_with("_") {
+                    continue;
+                }
                 return Some((name, path));
             }
+        }
+    }
+
+    // Search subdirectories (excluding hidden, __pycache__, venv)
+    if let Ok(entries) = fs::read_dir(temp) {
+        for entry in entries.flatten() {
+            let path = entry.path();
             if path.is_dir() {
                 let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if dir_name.starts_with(".") || dir_name == "__pycache__" || dir_name == "venv" {
