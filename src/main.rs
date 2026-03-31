@@ -2149,11 +2149,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
         }
 
         // Create compatibility symlinks for data directories in ~/.local/share
-        let data_symlinks = if !data_files.is_empty() {
-            create_data_symlinks(Path::new(&install_path), repo)
-        } else {
-            Vec::new()
-        };
+        let data_symlinks = create_data_symlinks(Path::new(&install_path), repo);
 
         if bs != "npm" {
             let _ = fs::remove_dir_all(&temp);
