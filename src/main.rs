@@ -228,25 +228,46 @@ fn is_installed(bin: &str) -> bool {
 }
 
 fn detect_build_system(path: &str) -> Option<&'static str> {
-    // Priority order: Universal build systems first, then language-specific
+    let base = Path::new(path);
+
     for (file, sys) in [
-        // Universal build systems (higher priority)
         ("Makefile", "make"),
         ("CMakeLists.txt", "cmake"),
         ("meson.build", "meson"),
         ("mason.toml", "mason"),
-        // Language-specific build systems (lower priority)
         ("Cargo.toml", "cargo"),
         ("package.json", "npm"),
         ("build.gradle", "gradle"),
         ("go.mod", "go"),
-        // Experimental: Python projects (pyproject.toml) checked later
         ("pyproject.toml", "python"),
+        ("setup.py", "python"),
+        ("requirements.txt", "python"),
     ] {
-        if Path::new(path).join(file).exists() {
+        if base.join(file).exists() {
             return Some(sys);
         }
     }
+
+    if let Ok(entries) = fs::read_dir(base) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if Path::new(&name)
+                .extension()
+                .map(|e| e == "py")
+                .unwrap_or(false)
+            {
+                if name.contains("script")
+                    || name == "main.py"
+                    || name == "app.py"
+                    || name == "cli.py"
+                    || name == "run.py"
+                {
+                    return Some("python");
+                }
+            }
+        }
+    }
+
     None
 }
 
