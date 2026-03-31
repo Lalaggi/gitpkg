@@ -861,72 +861,52 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
         // System-wide icons (if sudo was obtained)
         if system_wide {
             let system_icons_dir = Path::new("/usr/share/icons/hicolor");
-            if let Err(e) = fs::create_dir_all(&system_icons_dir) {
-                eprintln!("Failed to create system icons directory: {}", e);
-            } else {
-                if let Ok(entries) = fs::read_dir(&app_icons_dir) {
-                    for entry in entries.flatten() {
-                        let src = entry.path();
-                        let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-                        if name == "meson.build" || name == "CMakeLists.txt" {
-                            continue;
-                        }
+            // Use sudo cp to copy icons to system location
+            if let Ok(entries) = fs::read_dir(&app_icons_dir) {
+                for entry in entries.flatten() {
+                    let src = entry.path();
+                    let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-                        if src.is_dir() {
-                            if let Ok(subentries) = fs::read_dir(&src) {
-                                for subentry in subentries.flatten() {
-                                    let sub_src = subentry.path();
-                                    let sub_name =
-                                        sub_src.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                                    let dest = system_icons_dir.join(sub_name);
+                    if name == "meson.build" || name == "CMakeLists.txt" {
+                        continue;
+                    }
 
-                                    if sub_src.is_dir() {
-                                        if let Err(e) = copy_icon_dir(&sub_src, &dest) {
-                                            eprintln!(
-                                                "Failed to copy system icon dir {}: {}",
-                                                dest.display(),
-                                                e
-                                            );
-                                        } else {
-                                            println!(
-                                                "Installed system icon dir: {}",
-                                                dest.display()
-                                            );
-                                        }
-                                    } else if sub_src.is_file() {
-                                        if let Err(e) = fs::copy(&sub_src, &dest) {
-                                            eprintln!(
-                                                "Failed to copy system icon {}: {}",
-                                                dest.display(),
-                                                e
-                                            );
-                                        } else {
-                                            println!("Installed system icon: {}", dest.display());
-                                        }
-                                    }
-                                }
-                            }
-                        } else if src.is_file() {
-                            let dest = system_icons_dir.join(name);
-                            if let Err(e) = fs::copy(&src, &dest) {
-                                eprintln!("Failed to copy system icon {}: {}", dest.display(), e);
+                    // Use sudo cp -r to copy each top-level directory (scalable, symbolic, etc.)
+                    if src.is_dir() {
+                        let status = Command::new("sudo")
+                            .arg("cp")
+                            .arg("-r")
+                            .arg(&src)
+                            .arg(&system_icons_dir)
+                            .status();
+                        if let Ok(s) = status {
+                            if s.success() {
+                                println!("Installed system icons: {}", name);
                             } else {
-                                println!("Installed system icon: {}", dest.display());
+                                eprintln!("Failed to copy system icons: {}", name);
+                            }
+                        }
+                    } else if src.is_file() {
+                        let dest = system_icons_dir.join(&name);
+                        let status = Command::new("sudo").arg("cp").arg(&src).arg(&dest).status();
+                        if let Ok(s) = status {
+                            if s.success() {
+                                println!("Installed system icon: {}", name);
                             }
                         }
                     }
                 }
+            }
 
-                if is_installed("gtk-update-icon-cache") {
-                    let _ = Command::new("sudo")
-                        .arg("gtk-update-icon-cache")
-                        .arg("-f")
-                        .arg("-t")
-                        .arg(&system_icons_dir)
-                        .status();
-                    println!("Updated system icon cache for hicolor");
-                }
+            if is_installed("gtk-update-icon-cache") {
+                let _ = Command::new("sudo")
+                    .arg("gtk-update-icon-cache")
+                    .arg("-f")
+                    .arg("-t")
+                    .arg(&system_icons_dir)
+                    .status();
+                println!("Updated system icon cache for hicolor");
             }
         }
     }
