@@ -794,6 +794,7 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
     if app_icons_dir.exists() {
         // User icons (always)
         let user_icons_dir = Path::new(&home).join(".local/share/icons/hicolor");
+        let is_system = system_wide;
 
         if let Err(e) = fs::create_dir_all(&user_icons_dir) {
             eprintln!("Failed to create user icons directory: {}", e);
@@ -823,14 +824,25 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
                                             e
                                         );
                                     } else {
-                                        println!("Installed icon dir: {}", dest.display());
+                                        if is_system {
+                                            println!(
+                                                "Installed system icon dir: {}",
+                                                dest.display()
+                                            );
+                                        } else {
+                                            println!("Installed icon dir: {}", dest.display());
+                                        }
                                         created.push(dest);
                                     }
                                 } else if sub_src.is_file() {
                                     if let Err(e) = fs::copy(&sub_src, &dest) {
                                         eprintln!("Failed to copy icon {}: {}", dest.display(), e);
                                     } else {
-                                        println!("Installed icon: {}", dest.display());
+                                        if is_system {
+                                            println!("Installed system icon: {}", dest.display());
+                                        } else {
+                                            println!("Installed icon: {}", dest.display());
+                                        }
                                         created.push(dest);
                                     }
                                 }
@@ -841,7 +853,11 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
                         if let Err(e) = fs::copy(&src, &dest) {
                             eprintln!("Failed to copy icon {}: {}", dest.display(), e);
                         } else {
-                            println!("Installed icon: {}", dest.display());
+                            if is_system {
+                                println!("Installed system icon: {}", dest.display());
+                            } else {
+                                println!("Installed icon: {}", dest.display());
+                            }
                             created.push(dest);
                         }
                     }
@@ -854,7 +870,11 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
                     .arg("-t")
                     .arg(&user_icons_dir)
                     .status();
-                println!("Updated icon cache for hicolor");
+                if is_system {
+                    println!("Updated system icon cache for hicolor");
+                } else {
+                    println!("Updated icon cache for hicolor");
+                }
             }
         }
 
@@ -862,7 +882,6 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
         if system_wide {
             let system_icons_dir = Path::new("/usr/share/icons/hicolor");
 
-            // Use sudo cp to copy icons to system location
             if let Ok(entries) = fs::read_dir(&app_icons_dir) {
                 for entry in entries.flatten() {
                     let src = entry.path();
@@ -872,27 +891,56 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
                         continue;
                     }
 
-                    // Use sudo cp -r to copy each top-level directory (scalable, symbolic, etc.)
                     if src.is_dir() {
+                        // src is e.g. <install>/share/icons/hicolor/scalable
+                        // We want to copy its contents INTO /usr/share/icons/hicolor/<name>/
+                        let dest_subdir = system_icons_dir.join(name);
                         let status = Command::new("sudo")
-                            .arg("cp")
-                            .arg("-r")
-                            .arg(&src)
-                            .arg(&system_icons_dir)
+                            .arg("mkdir")
+                            .arg("-p")
+                            .arg(&dest_subdir)
                             .status();
                         if let Ok(s) = status {
-                            if s.success() {
-                                println!("Installed system icons: {}", name);
-                            } else {
-                                eprintln!("Failed to copy system icons: {}", name);
+                            if !s.success() {
+                                eprintln!(
+                                    "Failed to create system icon subdir: {}",
+                                    dest_subdir.display()
+                                );
+                                continue;
+                            }
+                        }
+                        // Copy contents of src into dest_subdir
+                        if let Ok(subentries) = fs::read_dir(&src) {
+                            for subentry in subentries.flatten() {
+                                let sub_src = subentry.path();
+                                let sub_name =
+                                    sub_src.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                                let sub_dest = dest_subdir.join(sub_name);
+                                let status = Command::new("sudo")
+                                    .arg("cp")
+                                    .arg("-r")
+                                    .arg(&sub_src)
+                                    .arg(&sub_dest)
+                                    .status();
+                                if let Ok(s) = status {
+                                    if s.success() {
+                                        println!("Installed system icon: {}", sub_dest.display());
+                                    } else {
+                                        eprintln!(
+                                            "Failed to copy system icon: {}",
+                                            sub_dest.display()
+                                        );
+                                    }
+                                }
                             }
                         }
                     } else if src.is_file() {
-                        let dest = system_icons_dir.join(&name);
+                        // Top-level icon file (e.g. org.gnome.Solanum.Source.svg)
+                        let dest = system_icons_dir.join(name);
                         let status = Command::new("sudo").arg("cp").arg(&src).arg(&dest).status();
                         if let Ok(s) = status {
                             if s.success() {
-                                println!("Installed system icon: {}", name);
+                                println!("Installed system icon: {}", dest.display());
                             }
                         }
                     }
@@ -903,10 +951,10 @@ fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) -> V
                 let _ = Command::new("sudo")
                     .arg("gtk-update-icon-cache")
                     .arg("-f")
-                    .arg("-t")
-                    .arg(&system_icons_dir)
+                    .arg("--ignore-theme-index")
+                    .arg(system_icons_dir)
                     .status();
-                println!("Updated system icon cache for hicolor");
+                println!("Updated system icon cache at /usr/share/icons/hicolor");
             }
         }
     }
