@@ -778,48 +778,34 @@ fn create_data_symlinks(install_path: &Path, repo: &str) -> Vec<PathBuf> {
         if let Err(e) = fs::create_dir_all(&user_icons_dir) {
             eprintln!("Failed to create user icons directory: {}", e);
         } else {
-            // Copy icon directory contents to hicolor
-            // Icons need proper subdirectory structure (e.g., 48x48/apps, scalable/apps)
+            // Copy all contents from app's icons directory to user hicolor
             if let Ok(entries) = fs::read_dir(&app_icons_dir) {
                 for entry in entries.flatten() {
                     let src = entry.path();
                     let name = src.file_name().and_then(|n| n.to_str()).unwrap_or("");
 
-                    // Skip non-directory, non-icon files
-                    if !src.is_dir() {
-                        // Only copy actual icon files (svg, png), skip build files
-                        if name.ends_with(".svg")
-                            || name.ends_with(".png")
-                            || name.ends_with(".ico")
-                        {
-                            let dest = user_icons_dir.join(name);
-                            if !dest.exists() {
-                                if let Err(e) = fs::copy(&src, &dest) {
-                                    eprintln!("Failed to copy icon {}: {}", dest.display(), e);
-                                } else {
-                                    println!("Installed icon: {}", dest.display());
-                                    created.push(dest);
-                                }
-                            }
-                        }
+                    // Skip build files
+                    if name == "meson.build" || name == "CMakeLists.txt" {
                         continue;
                     }
 
-                    // Skip non-icon-theme directories
-                    if name == "hicolor" || name == "Adwaita" || name == "gnome" {
-                        // Copy the entire subdirectory structure
+                    if src.is_dir() {
+                        // Copy entire directory (e.g., 48x48, scalable, hicolor, Adwaita)
                         let dest = user_icons_dir.join(name);
-                        if !dest.exists() {
-                            if let Err(e) = copy_dir_all(&src, &dest) {
-                                eprintln!(
-                                    "Failed to copy icon directory {}: {}",
-                                    dest.display(),
-                                    e
-                                );
-                            } else {
-                                println!("Installed icon directory: {}", dest.display());
-                                created.push(dest);
-                            }
+                        if let Err(e) = copy_dir_all(&src, &dest) {
+                            eprintln!("Failed to copy icon directory {}: {}", dest.display(), e);
+                        } else {
+                            println!("Installed icon directory: {}", dest.display());
+                            created.push(dest);
+                        }
+                    } else if src.is_file() {
+                        // Copy individual icon files to root of hicolor
+                        let dest = user_icons_dir.join(name);
+                        if let Err(e) = fs::copy(&src, &dest) {
+                            eprintln!("Failed to copy icon {}: {}", dest.display(), e);
+                        } else {
+                            println!("Installed icon: {}", dest.display());
+                            created.push(dest);
                         }
                     }
                 }
