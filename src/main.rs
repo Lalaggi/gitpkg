@@ -250,18 +250,25 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
 
     if let Ok(entries) = fs::read_dir(base) {
         for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if !entry_path.is_file() {
+                continue;
+            }
+
             let name = entry.file_name().to_string_lossy().to_string();
-            if Path::new(&name)
-                .extension()
-                .map(|e| e == "py")
-                .unwrap_or(false)
-            {
-                if name.contains("script")
-                    || name == "main.py"
-                    || name == "app.py"
-                    || name == "cli.py"
-                    || name == "run.py"
-                {
+            if name.starts_with(".") || name == "setup.py" {
+                continue;
+            }
+
+            let output = Command::new("file")
+                .arg("--mime-type")
+                .arg("-b")
+                .arg(&entry_path)
+                .output();
+
+            if let Ok(o) = output {
+                let mime = String::from_utf8_lossy(&o.stdout);
+                if mime.contains("python") {
                     return Some("python");
                 }
             }
