@@ -1658,131 +1658,112 @@ fn build_python(
 
     let temp_path = Path::new(temp);
 
-    // Check for pyproject.toml or setup.py - use pip install . approach
     let has_pyproject = temp_path.join("pyproject.toml").exists();
     let has_setup_py = temp_path.join("setup.py").exists();
-
-    // Install requirements.txt with --break-system-packages if it exists
-    let req_file = temp_path.join("requirements.txt");
-    if req_file.exists() {
-        println!("Installing requirements with --break-system-packages...");
-        let mut req_cmd = Command::new(python_cmd);
-        req_cmd
-            .arg("-m")
-            .arg("pip")
-            .arg("install")
-            .arg("--break-system-packages")
-            .arg("-r")
-            .arg(&req_file);
-        if !verbose {
-            req_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-        let req_status = req_cmd.status().ok()?;
-        if !req_status.success() {
-            eprintln!("Failed to install requirements.txt");
-            return Some(req_status);
-        }
-    }
-
-    // Find the main Python script
-    let main_script = find_main_python_script(temp_path, repo);
 
     let bin_dir = Path::new(install_path).join("bin");
     fs::create_dir_all(&bin_dir).ok()?;
 
-    if let Some((script_name, script_path)) = main_script {
-        // Put the script in its own folder: lib/<repo>/
-        let lib_dir = Path::new(install_path).join("lib").join(repo);
-        fs::create_dir_all(&lib_dir).ok()?;
+    if has_pyproject || has_setup_py {
+        let venv_dir = Path::new(install_path).join("venv");
+        fs::create_dir_all(&venv_dir).ok()?;
 
-        let dest_script = lib_dir.join(&script_name);
-        fs::copy(&script_path, &dest_script).ok()?;
+        println!("Creating virtualenv at {}", venv_dir.display());
+        let mut venv_cmd = Command::new(python_cmd);
+        venv_cmd.arg("-m").arg("venv").arg(&venv_dir);
+        if !verbose {
+            venv_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let venv_status = venv_cmd.status().ok()?;
+        if !venv_status.success() {
+            eprintln!("Failed to create virtualenv");
+            return Some(venv_status);
+        }
 
-        // Ensure script has execute permission
-        let mut perms = fs::metadata(&dest_script).unwrap().permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&dest_script, perms).ok();
+        let venv_python = venv_dir.join("bin").join("python");
 
-        // Ensure script has a shebang
-        if let Ok(content) = fs::read_to_string(&dest_script) {
-            if !content.starts_with("#!") {
-                let new_content = format!("#!/usr/bin/env {}\n{}", python_cmd, content);
-                fs::write(&dest_script, new_content).ok();
-                // Re-apply execute permission after write
-                let mut perms = fs::metadata(&dest_script).unwrap().permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&dest_script, perms).ok();
+        let mut pip_upgrade = Command::new(&venv_python);
+        pip_upgrade
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--upgrade")
+            .arg("pip")
+            .arg("setuptools")
+            .arg("wheel");
+        if !verbose {
+            pip_upgrade.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let _ = pip_upgrade.status().ok()?;
+
+        let req_file = temp_path.join("requirements.txt");
+        if req_file.exists() {
+            println!("Installing requirements in venv...");
+            let mut req_cmd = Command::new(&venv_python);
+            req_cmd
+                .arg("-m")
+                .arg("pip")
+                .arg("install")
+                .arg("-r")
+                .arg(&req_file);
+            if !verbose {
+                req_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+            let req_status = req_cmd.status().ok()?;
+            if !req_status.success() {
+                eprintln!("Failed to install requirements.txt");
+                return Some(req_status);
             }
         }
 
-        // Create symlink in bin/ pointing to the script
-        let symlink_path = bin_dir.join(&script_name);
-        let _ = fs::remove_file(&symlink_path);
-        if let Err(e) = std::os::unix::fs::symlink(&dest_script, &symlink_path) {
-            eprintln!("Failed to create symlink: {}", e);
-        } else {
-            println!(
-                "Created symlink: {} -> {}",
-                symlink_path.display(),
-                dest_script.display()
-            );
-        }
-
-        println!(
-            "Installed python script: {} -> {}",
-            symlink_path.display(),
-            dest_script.display()
-        );
-
-        return Some(std::process::ExitStatus::from_raw(0));
-    } else if has_pyproject || has_setup_py {
-        // Fall back to pip install . for proper packages
-        println!("Installing python package with pip...");
-        let mut install_cmd = Command::new(python_cmd);
+        let mut install_cmd = Command::new(&venv_python);
         install_cmd
             .arg("-m")
             .arg("pip")
             .arg("install")
-            .arg("--break-system-packages")
-            .arg(".");
+            .arg(".")
+            .current_dir(temp);
         if !verbose {
             install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
-        let install_status = install_cmd.current_dir(temp).status().ok()?;
+        let install_status = install_cmd.status().ok()?;
         if !install_status.success() {
             eprintln!("pip install failed for python package");
             return Some(install_status);
         }
 
-        // Find and symlink console scripts from site-packages
-        let site_packages = Command::new(python_cmd)
-            .arg("-c")
-            .arg("import site; print(site.getsitepackages()[0])")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string());
-
-        if let Some(sp) = site_packages {
-            let bin_in_sp = Path::new(&sp).join("..").join("bin");
-            if let Ok(entries) = fs::read_dir(&bin_in_sp) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() {
-                        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                            // Skip python and pip
-                            if name == "python"
-                                || name.starts_with("python")
-                                || name == "pip"
-                                || name.starts_with("pip")
-                            {
-                                continue;
-                            }
-                            let symlink_path = bin_dir.join(name);
-                            let _ = fs::remove_file(&symlink_path);
-                            let _ = std::os::unix::fs::symlink(&path, &symlink_path);
-                            println!("Linked console script: {}", name);
+        let venv_bin = venv_dir.join("bin");
+        if let Ok(entries) = fs::read_dir(&venv_bin) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        if name == "python"
+                            || name.starts_with("python")
+                            || name == "pip"
+                            || name.starts_with("pip")
+                        {
+                            continue;
                         }
+
+                        let wrapper = bin_dir.join(name);
+                        let script = format!(
+                            "#!/bin/bash\n# Autogenerated wrapper for python package {}\nexport GITPKG_PACKAGE_ROOT=\"{}\"\nexec \"{}\" \"$@\"\n",
+                            repo,
+                            install_path,
+                            path.display()
+                        );
+                        if let Err(e) = fs::write(&wrapper, script) {
+                            eprintln!("Failed to write wrapper {}: {}", wrapper.display(), e);
+                            continue;
+                        }
+                        let mut perms = fs::metadata(&wrapper).unwrap().permissions();
+                        perms.set_mode(0o755);
+                        fs::set_permissions(&wrapper, perms).ok();
+                        println!(
+                            "Installed python console script wrapper: {}",
+                            wrapper.display()
+                        );
                     }
                 }
             }
@@ -1790,8 +1771,73 @@ fn build_python(
 
         Some(install_status)
     } else {
-        eprintln!("No python script found (expected main.py, app.py, or <repo>.py)");
-        None
+        let req_file = temp_path.join("requirements.txt");
+        if req_file.exists() {
+            println!("Installing requirements with --break-system-packages...");
+            let mut req_cmd = Command::new(python_cmd);
+            req_cmd
+                .arg("-m")
+                .arg("pip")
+                .arg("install")
+                .arg("--break-system-packages")
+                .arg("-r")
+                .arg(&req_file);
+            if !verbose {
+                req_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+            }
+            let req_status = req_cmd.status().ok()?;
+            if !req_status.success() {
+                eprintln!("Failed to install requirements.txt");
+                return Some(req_status);
+            }
+        }
+
+        let main_script = find_main_python_script(temp_path, repo);
+
+        if let Some((script_name, script_path)) = main_script {
+            let lib_dir = Path::new(install_path).join("lib").join(repo);
+            fs::create_dir_all(&lib_dir).ok()?;
+
+            let dest_script = lib_dir.join(&script_name);
+            fs::copy(&script_path, &dest_script).ok()?;
+
+            let mut perms = fs::metadata(&dest_script).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest_script, perms).ok();
+
+            if let Ok(content) = fs::read_to_string(&dest_script) {
+                if !content.starts_with("#!") {
+                    let new_content = format!("#!/usr/bin/env {}\n{}", python_cmd, content);
+                    fs::write(&dest_script, new_content).ok();
+                    let mut perms = fs::metadata(&dest_script).unwrap().permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&dest_script, perms).ok();
+                }
+            }
+
+            let symlink_path = bin_dir.join(&script_name);
+            let _ = fs::remove_file(&symlink_path);
+            if let Err(e) = std::os::unix::fs::symlink(&dest_script, &symlink_path) {
+                eprintln!("Failed to create symlink: {}", e);
+            } else {
+                println!(
+                    "Created symlink: {} -> {}",
+                    symlink_path.display(),
+                    dest_script.display()
+                );
+            }
+
+            println!(
+                "Installed python script: {} -> {}",
+                symlink_path.display(),
+                dest_script.display()
+            );
+
+            Some(std::process::ExitStatus::from_raw(0))
+        } else {
+            eprintln!("No python script found (expected main.py, app.py, or <repo>.py)");
+            None
+        }
     }
 }
 
