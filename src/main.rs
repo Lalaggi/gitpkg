@@ -1959,7 +1959,6 @@ fn build_python(
 }
 
 fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)> {
-    // Check for common main script names
     let candidates: Vec<String> = vec![
         "main.py".to_string(),
         "app.py".to_string(),
@@ -1978,21 +1977,48 @@ fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)>
         }
     }
 
-    // Search for .py files in temp (excluding __pycache__, venv, etc.)
+    fn is_python_file(path: &Path) -> bool {
+        if !path.is_file() {
+            return false;
+        }
+        let output = Command::new("file")
+            .arg("--mime-type")
+            .arg("-b")
+            .arg(path)
+            .output();
+        if let Ok(o) = output {
+            let mime = String::from_utf8_lossy(&o.stdout);
+            return mime.contains("python");
+        }
+        false
+    }
+
     if let Ok(entries) = fs::read_dir(temp) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() {
-                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                    if ext == "py" {
-                        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                        // Skip common non-entry-point files
-                        if !name.starts_with("test_")
-                            && !name.starts_with("_")
-                            && name != "setup.py"
-                            && name != "__init__.py"
-                        {
-                            return Some((name.to_string(), path));
+            if path.is_file() && is_python_file(&path) {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("script")
+                    .to_string();
+                return Some((name, path));
+            }
+            if path.is_dir() {
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if dir_name.starts_with(".") || dir_name == "__pycache__" || dir_name == "venv" {
+                    continue;
+                }
+                if let Ok(subentries) = fs::read_dir(&path) {
+                    for subentry in subentries.flatten() {
+                        let sub_path = subentry.path();
+                        if sub_path.is_file() && is_python_file(&sub_path) {
+                            let name = sub_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("script")
+                                .to_string();
+                            return Some((name, sub_path));
                         }
                     }
                 }
