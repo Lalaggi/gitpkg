@@ -347,6 +347,12 @@ fn build_system_packages(build_system: &str, pm: &str) -> Option<&'static str> {
     }
     map.insert("gradle", gradle_map);
 
+    let mut python_map = HashMap::new();
+    for &p in ["apt", "dnf", "yum", "pacman", "zypper", "apk", "nix-env"].iter() {
+        python_map.insert(p, "python");
+    }
+    map.insert("python", python_map);
+
     map.get(build_system)?.get(pm).copied()
 }
 
@@ -1278,63 +1284,124 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>) {
             return;
         }
     };
-    let compiler = match build_system_packages(bs, pm) {
-        Some(c) => c,
-        None => {
-            println!("No compiler mapping for {} on {}", bs, pm);
-            return;
-        }
-    };
 
-    // Install compiler if missing
-    if !is_installed(bs) {
-        println!("Installing {} for {} via {}...", compiler, bs, pm);
-        let status = match pm {
-            "apt" => Command::new("sudo")
-                .arg("apt")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "dnf" => Command::new("sudo")
-                .arg("dnf")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "yum" => Command::new("sudo")
-                .arg("yum")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "pacman" => Command::new("sudo")
-                .arg("pacman")
-                .arg("-Sy")
-                .arg("--noconfirm")
-                .arg(compiler)
-                .status(),
-            "zypper" => Command::new("sudo")
-                .arg("zypper")
-                .arg("install")
-                .arg("-y")
-                .arg(compiler)
-                .status(),
-            "apk" => Command::new("sudo")
-                .arg("apk")
-                .arg("add")
-                .arg(compiler)
-                .status(),
-            "nix-env" => Command::new("nix-env").arg("-iA").arg(compiler).status(),
-            _ => {
-                eprintln!("Unsupported package manager");
+    // For python, we don't need to install a compiler, just check python exists
+    let compiler = if bs == "python" {
+        if is_installed("python3") || is_installed("python") {
+            None
+        } else {
+            println!("Python not found, attempting to install via {}...", pm);
+            let status = match pm {
+                "apt" => Command::new("sudo")
+                    .arg("apt")
+                    .arg("install")
+                    .arg("-y")
+                    .arg("python3")
+                    .status(),
+                "dnf" => Command::new("sudo")
+                    .arg("dnf")
+                    .arg("install")
+                    .arg("-y")
+                    .arg("python3")
+                    .status(),
+                "yum" => Command::new("sudo")
+                    .arg("yum")
+                    .arg("install")
+                    .arg("-y")
+                    .arg("python3")
+                    .status(),
+                "pacman" => Command::new("sudo")
+                    .arg("pacman")
+                    .arg("-Sy")
+                    .arg("--noconfirm")
+                    .arg("python")
+                    .status(),
+                "zypper" => Command::new("sudo")
+                    .arg("zypper")
+                    .arg("install")
+                    .arg("-y")
+                    .arg("python3")
+                    .status(),
+                "apk" => Command::new("sudo")
+                    .arg("apk")
+                    .arg("add")
+                    .arg("python3")
+                    .status(),
+                "nix-env" => Command::new("nix-env").arg("-iA").arg("python3").status(),
+                _ => {
+                    eprintln!("Unsupported package manager");
+                    return;
+                }
+            };
+            if let Ok(s) = status {
+                if !s.success() {
+                    eprintln!("Failed to install python");
+                    return;
+                }
+            }
+            None
+        }
+    } else {
+        Some(match build_system_packages(bs, pm) {
+            Some(c) => c,
+            None => {
+                println!("No compiler mapping for {} on {}", bs, pm);
                 return;
             }
-        };
-        if let Ok(s) = status {
-            if !s.success() {
-                eprintln!("Failed installing {}", compiler);
-                return;
+        })
+    };
+
+    // Install compiler if missing (skip for python - handled above)
+    if let Some(comp) = compiler {
+        if !is_installed(bs) {
+            println!("Installing {} for {} via {}...", comp, bs, pm);
+            let status = match pm {
+                "apt" => Command::new("sudo")
+                    .arg("apt")
+                    .arg("install")
+                    .arg("-y")
+                    .arg(comp)
+                    .status(),
+                "dnf" => Command::new("sudo")
+                    .arg("dnf")
+                    .arg("install")
+                    .arg("-y")
+                    .arg(comp)
+                    .status(),
+                "yum" => Command::new("sudo")
+                    .arg("yum")
+                    .arg("install")
+                    .arg("-y")
+                    .arg(comp)
+                    .status(),
+                "pacman" => Command::new("sudo")
+                    .arg("pacman")
+                    .arg("-Sy")
+                    .arg("--noconfirm")
+                    .arg(comp)
+                    .status(),
+                "zypper" => Command::new("sudo")
+                    .arg("zypper")
+                    .arg("install")
+                    .arg("-y")
+                    .arg(comp)
+                    .status(),
+                "apk" => Command::new("sudo")
+                    .arg("apk")
+                    .arg("add")
+                    .arg(comp)
+                    .status(),
+                "nix-env" => Command::new("nix-env").arg("-iA").arg(comp).status(),
+                _ => {
+                    eprintln!("Unsupported package manager");
+                    return;
+                }
+            };
+            if let Ok(s) = status {
+                if !s.success() {
+                    eprintln!("Failed installing {}", comp);
+                    return;
+                }
             }
         }
     }
