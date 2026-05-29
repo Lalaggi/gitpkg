@@ -11,7 +11,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|help> [args] [-v] [--supplier <domain>]"
+            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|change-branch|help> [args] [-v] [--supplier <domain>] [--branch <branch>]"
         );
         std::process::exit(1);
     }
@@ -32,13 +32,31 @@ fn main() {
         None
     };
 
+    // Parse --branch flag (used by install)
+    let branch = if let Some(pos) = args.iter().position(|arg| arg == "--branch") {
+        if pos + 1 < args.len() {
+            let b = args[pos + 1].clone();
+            if b.is_empty() {
+                eprintln!("Error: --branch requires a non-empty branch name");
+                std::process::exit(1);
+            }
+            Some(b)
+        } else {
+            eprintln!("Error: --branch flag requires a branch name argument");
+            eprintln!("Example: --branch stable");
+            std::process::exit(1);
+        }
+    } else {
+        None
+    };
+
     match command.as_str() {
         "install" => {
             if args.len() < 3 {
-                eprintln!("Usage: gitpkg install <user>/<repo> [--supplier <domain>]");
+                eprintln!("Usage: gitpkg install <user>/<repo> [--supplier <domain>] [--branch <branch>]");
                 return;
             }
-            install(&args[2], verbose, supplier.as_deref());
+            install(&args[2], verbose, supplier.as_deref(), branch.as_deref());
         }
         "remove" => {
             if args.len() < 3 {
@@ -86,6 +104,14 @@ fn main() {
             let target = resolve_self_alias(&args[2]);
             versions(&target);
         }
+        "change-branch" => {
+            if args.len() < 4 {
+                eprintln!("Usage: gitpkg change-branch <user>/<repo> <branch-name>");
+                return;
+            }
+            let target = resolve_self_alias(&args[2]);
+            change_branch(&target, &args[3], verbose, supplier.as_deref());
+        }
         "list" => list(),
         "upgrade" => {
             // Default to upgrading all when no target is provided
@@ -103,15 +129,16 @@ fn main() {
         "help" | "-h" | "--help" => {
             println!("gitpkg — minimal git-based package manager");
             println!();
-            println!("Usage: gitpkg <command> [args] [-v] [--supplier <domain>]");
+            println!("Usage: gitpkg <command> [args] [-v] [--supplier <domain>] [--branch <branch>]");
             println!();
             println!("Commands:");
-            println!("  install <user>/<repo>       Install a package");
+            println!("  install <user>/<repo>       Install a package (--branch to clone specific branch)");
             println!("  remove <user>/<repo>        Remove a package");
             println!("  clean <user>/<repo>|all     Remove old versions or all");
             println!("  list                        List installed packages");
             println!("  upgrade [<pkg>|all]         Upgrade package or all (defaults to all)");
             println!("  update [<pkg>|all]          Alias for upgrade (warns)");
+            println!("  change-branch <pkg> <br>    Switch installed package to a different branch");
             println!("  versions <user>/<repo>      List installed versions for a package");
             println!("  version <user>/<repo>       Alias for versions (warns)");
             println!("  goto <user>/<repo>          Print path to installed package (or spawn shell with -s)");
@@ -1440,7 +1467,7 @@ fn write_package_list(packages: &HashMap<String, String>) {
     fs::write(&list_path, content).unwrap();
 }
 
-fn install(package: &str, verbose: bool, supplier: Option<&str>) {
+fn install(package: &str, verbose: bool, supplier: Option<&str>, branch: Option<&str>) {
     let (user, repo) = parse_pkg(package);
     let url = build_git_url(&user, &repo, supplier);
     let supplier_domain = supplier.unwrap_or("github.com");
@@ -1451,7 +1478,7 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>) {
     }
 
     println!("Cloning {} from {} into {}", package, supplier_domain, path);
-    if !run_git_clone_with_progress(&url, &path, verbose) {
+    if !run_git_clone_with_progress(&url, &path, verbose, branch) {
         eprintln!("Git clone failed");
         return;
     }
@@ -1594,7 +1621,7 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>) {
         }
     }
 
-    build(&user, &repo, verbose, Some(supplier_domain));
+    build(&user, &repo, verbose, Some(supplier_domain), branch);
 }
 
 fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> std::process::ExitStatus {
@@ -2234,7 +2261,7 @@ fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)>
     None
 }
 
-fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>) {
+fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>, branch: Option<&str>) {
     let temp = temp_path(user, repo);
     let commit = get_commit_hash(&temp).unwrap_or_else(|| "unknown".to_string());
     let supplier_domain = supplier.unwrap_or("github.com");
@@ -2527,6 +2554,7 @@ exec {} "$@"
             !data_files.is_empty(), // Track if package has data files
             &data_symlinks,
             &desktop_symlinks,
+            branch,
         );
 
         // Update the desktop database so new launchers are visible
@@ -2551,6 +2579,7 @@ fn write_info(
     has_data_files: bool,
     data_symlinks: &[PathBuf],
     desktop_symlinks: &[PathBuf],
+    branch: Option<&str>,
 ) {
     use chrono::Utc;
 
@@ -2585,6 +2614,10 @@ fn write_info(
         supplier,
         has_data_files
     );
+
+    if let Some(b) = branch {
+        toml_data.push_str(&format!("branch = \"{}\"\n", b));
+    }
 
     if !data_symlinks.is_empty() {
         toml_data.push_str("data_symlinks = [\n");
@@ -3246,6 +3279,9 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         }
     };
 
+    // Read stored branch from info (None = default branch)
+    let stored_branch = info.get("branch").and_then(|v| v.as_str()).map(|s| s.to_string());
+
     // Use provided supplier or stored supplier
     let supplier_to_use = supplier.unwrap_or(&stored_supplier);
 
@@ -3254,6 +3290,9 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         get_package_key(&user, &repo, &stored_supplier),
         supplier_to_use
     );
+    if let Some(ref b) = stored_branch {
+        println!("Tracking branch: {}", b);
+    }
     println!("Current commit: {}", current_commit);
 
     // Clone to temp to get latest commit
@@ -3264,7 +3303,7 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         fs::remove_dir_all(&path).unwrap();
     }
 
-    if !run_git_clone_with_progress(&url, &path, verbose) {
+    if !run_git_clone_with_progress(&url, &path, verbose, stored_branch.as_deref()) {
         eprintln!("Git clone failed");
         return;
     }
@@ -3292,7 +3331,7 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
     println!("Update available! Building new version...");
 
     // Build the new version (this will create a new install path with the new commit hash)
-    build(&user, &repo, verbose, Some(supplier_to_use));
+    build(&user, &repo, verbose, Some(supplier_to_use), stored_branch.as_deref());
 
     println!(
         "Successfully upgraded {} from {} to {}",
@@ -3323,6 +3362,130 @@ fn upgrade_all(verbose: bool) {
     println!("\nAll packages checked for updates!");
 }
 
+fn check_branch_exists(url: &str, branch: &str) -> bool {
+    let output = Command::new("git")
+        .args(["ls-remote", "--heads", "--tags", url, branch])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            !stdout.trim().is_empty()
+        }
+        _ => false,
+    }
+}
+
+fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplier: Option<&str>) {
+    // Find the package — same pattern as upgrade
+    let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/') {
+        match find_package_by_key(package) {
+            Some((_pkg_key, sup, path)) => {
+                let (u, r) = parse_pkg(package);
+                (u, r, sup, path)
+            }
+            None => {
+                eprintln!("Package {} is not installed.", package);
+                return;
+            }
+        }
+    } else {
+        let (u, r) = parse_pkg(package);
+        let matches = find_matching_packages(&u, &r);
+        if matches.is_empty() {
+            eprintln!("Package {} is not installed.", package);
+            return;
+        }
+        let (_pkg_key, sup, path) = if matches.len() > 1 && cli_supplier.is_none() {
+            match prompt_package_selection(&matches) {
+                Some(idx) => matches[idx].clone(),
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else if matches.len() > 1 && cli_supplier.is_some() {
+            let sup_str = cli_supplier.unwrap();
+            match matches.iter().find(|(_, s, _)| s == sup_str) {
+                Some(m) => m.clone(),
+                None => {
+                    eprintln!("Package {}/{} from {} is not installed", u, r, sup_str);
+                    return;
+                }
+            }
+        } else {
+            matches[0].clone()
+        };
+        (u, r, sup, path)
+    };
+
+    let supplier_to_use = cli_supplier.unwrap_or(&stored_supplier);
+    let pkg_key = get_package_key(&user, &repo, supplier_to_use);
+
+    // Verify branch/ref exists on remote
+    let url = build_git_url(&user, &repo, Some(supplier_to_use));
+    println!("Checking if '{}' exists on remote...", new_branch);
+    if !check_branch_exists(&url, new_branch) {
+        eprintln!("Branch or tag '{}' does not exist on remote.", new_branch);
+        return;
+    }
+    println!("Ref '{}' exists!", new_branch);
+
+    // Remove current symlinks so build() can create fresh ones
+    if let Ok(content) = fs::read_to_string(&info_path) {
+        if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+            if let Some(sp) = info.get("symlink_path").and_then(|v| v.as_str()) {
+                let p = Path::new(sp);
+                if p.exists() {
+                    let _ = fs::remove_file(p);
+                    let _ = Command::new("sudo").arg("rm").arg("-f").arg(sp).status();
+                }
+            }
+            if let Some(dp) = info.get("desktop_file").and_then(|v| v.as_str()) {
+                let p = Path::new(dp);
+                if p.exists() {
+                    let _ = fs::remove_file(p);
+                }
+            }
+            if let Some(arr) = info.get("data_symlinks").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    if let Some(s) = entry.as_str() {
+                        let p = Path::new(s);
+                        if p.exists() {
+                            let _ = fs::remove_file(p);
+                        }
+                    }
+                }
+            }
+            if let Some(arr) = info.get("desktop_symlinks").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    if let Some(s) = entry.as_str() {
+                        let p = Path::new(s);
+                        if p.exists() {
+                            let _ = fs::remove_file(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Clone the new branch/ref to temp
+    let path = temp_path(&user, &repo);
+    if Path::new(&path).exists() {
+        fs::remove_dir_all(&path).unwrap();
+    }
+    println!("Cloning '{}'...", new_branch);
+    if !run_git_clone_with_progress(&url, &path, verbose, Some(new_branch)) {
+        eprintln!("Git clone failed");
+        return;
+    }
+
+    // Build — creates new install dir, symlinks, and updates info
+    build(&user, &repo, verbose, Some(supplier_to_use), Some(new_branch));
+
+    println!("Successfully switched {} to branch '{}'", pkg_key, new_branch);
+}
+
 // Helper: run a command with optional output
 fn run_cmd(mut cmd: Command, verbose: bool) -> bool {
     if !verbose {
@@ -3332,18 +3495,25 @@ fn run_cmd(mut cmd: Command, verbose: bool) -> bool {
 }
 
 // Specialized helper for `git clone` that shows a simple progress bar in non-verbose mode.
-fn run_git_clone_with_progress(url: &str, path: &str, verbose: bool) -> bool {
+fn run_git_clone_with_progress(url: &str, path: &str, verbose: bool, branch: Option<&str>) -> bool {
     if verbose {
         let mut cmd = Command::new("git");
-        cmd.arg("clone").arg(url).arg(path);
+        cmd.arg("clone");
+        if let Some(b) = branch {
+            cmd.arg("-b").arg(b).arg("--single-branch");
+        }
+        cmd.arg(url).arg(path);
         return run_cmd(cmd, true);
     }
 
-    let mut child = match Command::new("git")
-        .arg("clone")
-        .arg(url)
-        .arg(path)
-        .arg("--progress")
+    let mut clone_cmd = Command::new("git");
+    clone_cmd.arg("clone");
+    if let Some(b) = branch {
+        clone_cmd.arg("-b").arg(b).arg("--single-branch");
+    }
+    clone_cmd.arg(url).arg(path).arg("--progress");
+
+    let mut child = match clone_cmd
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
