@@ -17,7 +17,30 @@ fn main() {
     }
 
     let verbose = args.contains(&"-v".to_string());
-    let command = &args[1];
+
+    // Build positional arg list excluding flags and their values
+    let mut positional: Vec<String> = Vec::new();
+    let mut skip_next = false;
+    for arg in args.iter().skip(1) {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "-v" || arg == "--supplier" || arg == "--branch" || arg == "--shell" || arg == "-s" {
+            if *arg == "--supplier" || *arg == "--branch" {
+                skip_next = true;
+            }
+            continue;
+        }
+        positional.push(arg.clone());
+    }
+    if positional.is_empty() {
+        eprintln!(
+            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|change-branch|help> [args] [-v] [--supplier <domain>] [--branch <branch>]"
+        );
+        std::process::exit(1);
+    }
+    let command = &positional[0];
 
     // Parse --supplier flag
     let supplier = if let Some(pos) = args.iter().position(|arg| arg == "--supplier") {
@@ -52,76 +75,76 @@ fn main() {
 
     match command.as_str() {
         "install" => {
-            if args.len() < 3 {
+            if positional.len() < 2 {
                 eprintln!("Usage: gitpkg install <user>/<repo> [--supplier <domain>] [--branch <branch>]");
                 return;
             }
-            install(&args[2], verbose, supplier.as_deref(), branch.as_deref());
+            install(&positional[1], verbose, supplier.as_deref(), branch.as_deref());
         }
         "remove" => {
-            if args.len() < 3 {
+            if positional.len() < 2 {
                 eprintln!("Usage: gitpkg remove <user>/<repo>");
                 return;
             }
-            let target = resolve_self_alias(&args[2]);
+            let target = resolve_self_alias(&positional[1]);
             remove(&target);
         }
         "goto" => {
-            if args.len() < 3 {
+            if positional.len() < 2 {
                 eprintln!("Usage: gitpkg goto <user>/<repo> [--shell|-s]");
                 return;
             }
             let spawn_shell =
                 args.contains(&"--shell".to_string()) || args.contains(&"-s".to_string());
-            let target = resolve_self_alias(&args[2]);
+            let target = resolve_self_alias(&positional[1]);
             goto(&target, spawn_shell);
         }
         "clean" => {
-            if args.len() >= 3 && &args[2] == "all" {
+            if positional.len() >= 2 && &positional[1] == "all" {
                 clean_all();
-            } else if args.len() >= 3 {
-                let target = resolve_self_alias(&args[2]);
+            } else if positional.len() >= 2 {
+                let target = resolve_self_alias(&positional[1]);
                 clean(&target);
             } else {
                 clean_all();
             }
         }
         "versions" => {
-            if args.len() < 3 {
+            if positional.len() < 2 {
                 eprintln!("Usage: gitpkg versions <user>/<repo>");
                 return;
             }
-            let target = resolve_self_alias(&args[2]);
+            let target = resolve_self_alias(&positional[1]);
             versions(&target);
         }
         "version" => {
             // Alias for versions
             eprintln!("Warning: 'version' is an alias for 'versions'. It is recommended to use 'versions'.");
-            if args.len() < 3 {
+            if positional.len() < 2 {
                 eprintln!("Usage: gitpkg version <user>/<repo>");
                 return;
             }
-            let target = resolve_self_alias(&args[2]);
+            let target = resolve_self_alias(&positional[1]);
             versions(&target);
         }
         "change-branch" => {
-            if args.len() < 4 {
+            if positional.len() < 3 {
                 eprintln!("Usage: gitpkg change-branch <user>/<repo> <branch-name>");
                 return;
             }
-            let target = resolve_self_alias(&args[2]);
-            change_branch(&target, &args[3], verbose, supplier.as_deref());
+            let target = resolve_self_alias(&positional[1]);
+            change_branch(&target, &positional[2], verbose, supplier.as_deref());
         }
         "list" => list(),
         "upgrade" => {
             // Default to upgrading all when no target is provided
-            if args.len() < 3 || &args[2] == "all" {
+            if positional.len() < 2 || &positional[1] == "all" {
                 upgrade_all(verbose);
             } else {
-                let target = if args[2] == "self" {
+                let target = if positional[1] == "self" {
                     "el1lovescomputers/gitpkg".to_string()
                 } else {
-                    args[2].clone()
+                    positional[1].clone()
                 };
                 upgrade(&target, verbose, supplier.as_deref());
             }
@@ -148,13 +171,13 @@ fn main() {
         "update" => {
             // Alias for upgrade - show a warning recommending 'upgrade'
             eprintln!("Warning: 'update' and 'upgrade' do the same thing. It is recommended to use 'upgrade'.");
-            if args.len() < 3 || &args[2] == "all" {
+            if positional.len() < 2 || &positional[1] == "all" {
                 upgrade_all(verbose);
             } else {
-                let target = if args[2] == "self" {
+                let target = if positional[1] == "self" {
                     "el1lovescomputers/gitpkg".to_string()
                 } else {
-                    args[2].clone()
+                    positional[1].clone()
                 };
                 upgrade(&target, verbose, supplier.as_deref());
             }
@@ -3362,16 +3385,21 @@ fn upgrade_all(verbose: bool) {
     println!("\nAll packages checked for updates!");
 }
 
-fn check_branch_exists(url: &str, branch: &str) -> bool {
-    let output = Command::new("git")
-        .args(["ls-remote", "--heads", "--tags", url, branch])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => {
-            let stdout = String::from_utf8_lossy(&o.stdout);
-            !stdout.trim().is_empty()
+fn check_branch_exists(url: &str, branch: &str, verbose: bool) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args(["ls-remote", "--heads", "--tags", url, branch]);
+    if verbose {
+        let status = cmd.status();
+        status.map(|s| s.success()).unwrap_or(false)
+    } else {
+        let output = cmd.output();
+        match output {
+            Ok(o) if o.status.success() => {
+                let stdout = String::from_utf8_lossy(&o.stdout);
+                !stdout.trim().is_empty()
+            }
+            _ => false,
         }
-        _ => false,
     }
 }
 
@@ -3424,7 +3452,7 @@ fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplier: O
     // Verify branch/ref exists on remote
     let url = build_git_url(&user, &repo, Some(supplier_to_use));
     println!("Checking if '{}' exists on remote...", new_branch);
-    if !check_branch_exists(&url, new_branch) {
+    if !check_branch_exists(&url, new_branch, verbose) {
         eprintln!("Branch or tag '{}' does not exist on remote.", new_branch);
         return;
     }
