@@ -539,6 +539,71 @@ fn find_executables_in_cmake(cmake_path: &Path, repo: &str) -> Vec<String> {
     targets
 }
 
+fn find_executables_in_cargo(cargo_path: &Path) -> Vec<String> {
+    let mut targets = Vec::new();
+
+    if let Ok(content) = fs::read_to_string(cargo_path) {
+        let mut in_package = false;
+        let mut in_bin = false;
+        let mut package_name = String::new();
+        let mut has_explicit_bin = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("[package]") {
+                in_package = true;
+                in_bin = false;
+                continue;
+            }
+
+            if trimmed.starts_with("[[bin]]") {
+                in_bin = true;
+                in_package = false;
+                has_explicit_bin = true;
+                continue;
+            }
+
+            if trimmed.starts_with('[') {
+                in_package = false;
+                in_bin = false;
+            }
+
+            if in_package && trimmed.starts_with("name = ") {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    package_name = val.trim().trim_matches('"').to_string();
+                }
+            }
+
+            if in_bin && trimmed.starts_with("name = ") {
+                if let Some(val) = trimmed.split('=').nth(1) {
+                    let name = val.trim().trim_matches('"').to_string();
+                    if !name.is_empty() {
+                        targets.push(name);
+                    }
+                }
+            }
+        }
+
+        if !has_explicit_bin && !package_name.is_empty() {
+            targets.push(package_name);
+        }
+    }
+
+    targets
+}
+
+fn pascal_to_kebab_case(s: &str) -> String {
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if c.is_uppercase() && i > 0 {
+            result.push('-');
+        }
+        result.push(c.to_ascii_lowercase());
+    }
+    result
+}
+
 fn find_all_executables_recursive(dir: &Path) -> Vec<String> {
     let mut executables = Vec::new();
 
@@ -552,7 +617,6 @@ fn find_all_executables_recursive(dir: &Path) -> Vec<String> {
                     let dir_name = path.file_name().unwrap().to_string_lossy();
                     if !dir_name.starts_with('.')
                         && dir_name != "node_modules"
-                        && dir_name != "target"
                     {
                         search_dir(&path, executables);
                     }
@@ -1163,15 +1227,19 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         _ => {}
     }
 
-    // Fallback names if build file parsing didn't find anything
-    if search_names.is_empty() {
-        search_names = vec![
-            repo.to_string(),
-            repo.to_lowercase(),
-            "a.out".to_string(),
-            "main".to_string(),
-        ];
+    // Also check Cargo.toml if it exists (Rust projects wrapped in make/meson/cmake)
+    let cargo_toml = build_dir.join("Cargo.toml");
+    if cargo_toml.exists() {
+        let cargo_names = find_executables_in_cargo(&cargo_toml);
+        search_names.extend(cargo_names);
     }
+
+    // Always include fallback names (repo, lowercase, kebab-case, and common names)
+    search_names.push(repo.to_string());
+    search_names.push(repo.to_lowercase());
+    search_names.push(pascal_to_kebab_case(repo));
+    search_names.push("a.out".to_string());
+    search_names.push("main".to_string());
 
     // Search for executables in common build output directories
     let search_dirs = vec![
@@ -1180,6 +1248,8 @@ fn find_built_executable(build_dir: &Path, repo: &str, build_system: &str) -> Op
         build_dir.join("build"),
         build_dir.join("out"),
         build_dir.join("target"),
+        build_dir.join("target/release"),
+        build_dir.join("target/debug"),
         build_dir.join("src"), // Common for meson projects
     ];
 
@@ -2015,13 +2085,23 @@ fn build_python(
 
     let has_pyproject = temp_path.join("pyproject.toml").exists();
     let has_setup_py = temp_path.join("setup.py").exists();
+    let has_setup_cfg = temp_path.join("setup.cfg").exists();
+    let has_pipfile = temp_path.join("Pipfile").exists();
+    let has_poetry = temp_path.join("poetry.lock").exists();
+    let has_py_build = has_pyproject || has_setup_py || has_setup_cfg || has_pipfile || has_poetry;
 
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).ok()?;
+    if let Err(e) = fs::create_dir_all(&bin_dir) {
+        eprintln!("Failed to create bin directory {}: {}", bin_dir.display(), e);
+        return None;
+    }
 
-    if has_pyproject || has_setup_py {
+    if has_py_build {
         let venv_dir = Path::new(install_path).join("venv");
-        fs::create_dir_all(&venv_dir).ok()?;
+        if let Err(e) = fs::create_dir_all(&venv_dir) {
+            eprintln!("Failed to create venv directory {}: {}", venv_dir.display(), e);
+            return None;
+        }
 
         println!("Creating virtualenv at {}", venv_dir.display());
         let mut venv_cmd = Command::new(python_cmd);
@@ -2031,11 +2111,16 @@ fn build_python(
         }
         let venv_status = venv_cmd.status().ok()?;
         if !venv_status.success() {
-            eprintln!("Failed to create virtualenv");
+            eprintln!("Failed to create virtualenv. On Debian/Ubuntu, try: apt install python3-venv");
             return Some(venv_status);
         }
 
         let venv_python = venv_dir.join("bin").join("python");
+        if !venv_python.exists() {
+            eprintln!("Virtualenv created but python binary not found at {}", venv_python.display());
+            let _ = fs::remove_dir_all(&venv_dir);
+            return None;
+        }
 
         let mut pip_upgrade = Command::new(&venv_python);
         pip_upgrade
@@ -2066,7 +2151,8 @@ fn build_python(
             }
             let req_status = req_cmd.status().ok()?;
             if !req_status.success() {
-                eprintln!("Failed to install requirements.txt");
+                eprintln!("Failed to install requirements.txt, cleaning up venv...");
+                let _ = fs::remove_dir_all(&venv_dir);
                 return Some(req_status);
             }
         }
@@ -2083,7 +2169,8 @@ fn build_python(
         }
         let install_status = install_cmd.status().ok()?;
         if !install_status.success() {
-            eprintln!("pip install failed for python package");
+            eprintln!("pip install failed for python package, cleaning up venv...");
+            let _ = fs::remove_dir_all(&venv_dir);
             return Some(install_status);
         }
 
@@ -2102,6 +2189,10 @@ fn build_python(
                         }
 
                         let wrapper = bin_dir.join(name);
+                        if !path.exists() {
+                            eprintln!("Skipping wrapper for {}: target {} does not exist", name, path.display());
+                            continue;
+                        }
                         let script = format!(
                             "#!/bin/bash\n# Autogenerated wrapper for python package {}\nexport GITPKG_PACKAGE_ROOT=\"{}\"\nexec \"{}\" \"$@\"\n",
                             repo,
@@ -2112,9 +2203,13 @@ fn build_python(
                             eprintln!("Failed to write wrapper {}: {}", wrapper.display(), e);
                             continue;
                         }
-                        let mut perms = fs::metadata(&wrapper).unwrap().permissions();
-                        perms.set_mode(0o755);
-                        fs::set_permissions(&wrapper, perms).ok();
+                        if let Ok(meta) = fs::metadata(&wrapper) {
+                            let mut perms = meta.permissions();
+                            perms.set_mode(0o755);
+                            if let Err(e) = fs::set_permissions(&wrapper, perms) {
+                                eprintln!("Failed to set permissions on {}: {}", wrapper.display(), e);
+                            }
+                        }
                         println!(
                             "Installed python console script wrapper: {}",
                             wrapper.display()
@@ -2128,7 +2223,7 @@ fn build_python(
     } else {
         let req_file = temp_path.join("requirements.txt");
         if req_file.exists() {
-            println!("Installing requirements with --break-system-packages...");
+            println!("Installing requirements...");
             let mut req_cmd = Command::new(python_cmd);
             req_cmd
                 .arg("-m")
@@ -2142,8 +2237,22 @@ fn build_python(
             }
             let req_status = req_cmd.status().ok()?;
             if !req_status.success() {
-                eprintln!("Failed to install requirements.txt");
-                return Some(req_status);
+                eprintln!("pip install with --break-system-packages failed, retrying without...");
+                let mut req_cmd_fallback = Command::new(python_cmd);
+                req_cmd_fallback
+                    .arg("-m")
+                    .arg("pip")
+                    .arg("install")
+                    .arg("-r")
+                    .arg(&req_file);
+                if !verbose {
+                    req_cmd_fallback.stdout(Stdio::null()).stderr(Stdio::null());
+                }
+                let fallback_status = req_cmd_fallback.status().ok()?;
+                if !fallback_status.success() {
+                    eprintln!("Failed to install requirements.txt");
+                    return Some(fallback_status);
+                }
             }
         }
 
@@ -2151,22 +2260,36 @@ fn build_python(
 
         if let Some((script_name, script_path)) = main_script {
             let lib_dir = Path::new(install_path).join("lib").join(repo);
-            fs::create_dir_all(&lib_dir).ok()?;
+            if let Err(e) = fs::create_dir_all(&lib_dir) {
+                eprintln!("Failed to create lib directory {}: {}", lib_dir.display(), e);
+                return None;
+            }
 
             let dest_script = lib_dir.join(&script_name);
-            fs::copy(&script_path, &dest_script).ok()?;
+            if let Err(e) = fs::copy(&script_path, &dest_script) {
+                eprintln!("Failed to copy script {} to {}: {}", script_path.display(), dest_script.display(), e);
+                return None;
+            }
 
-            let mut perms = fs::metadata(&dest_script).unwrap().permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest_script, perms).ok();
+            if let Ok(meta) = fs::metadata(&dest_script) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o755);
+                if let Err(e) = fs::set_permissions(&dest_script, perms) {
+                    eprintln!("Failed to set permissions on {}: {}", dest_script.display(), e);
+                }
+            }
 
             if let Ok(content) = fs::read_to_string(&dest_script) {
                 if !content.starts_with("#!") {
                     let new_content = format!("#!/usr/bin/env {}\n{}", python_cmd, content);
-                    fs::write(&dest_script, new_content).ok();
-                    let mut perms = fs::metadata(&dest_script).unwrap().permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&dest_script, perms).ok();
+                    if let Err(e) = fs::write(&dest_script, new_content) {
+                        eprintln!("Failed to add shebang to {}: {}", dest_script.display(), e);
+                    }
+                    if let Ok(meta) = fs::metadata(&dest_script) {
+                        let mut perms = meta.permissions();
+                        perms.set_mode(0o755);
+                        let _ = fs::set_permissions(&dest_script, perms);
+                    }
                 }
             }
 
@@ -2200,6 +2323,11 @@ fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)>
     fn is_python_file(path: &Path) -> bool {
         if !path.is_file() {
             return false;
+        }
+        if let Some(ext) = path.extension()
+            && ext == "py"
+        {
+            return true;
         }
         let output = Command::new("file")
             .arg("--mime-type")
