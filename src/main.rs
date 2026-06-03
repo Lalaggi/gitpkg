@@ -736,8 +736,9 @@ fn install_data_files(
 ) -> Vec<(PathBuf, PathBuf)> {
     let mut installed = Vec::new();
 
-    // GTK4/GLib specific: look for data directories
+    // GTK4/GLib specific: look for data directories (including repo root)
     let data_dirs = [
+        source_dir.to_path_buf(), // Root-level files like .desktop, icons/
         source_dir.join("data"),
         source_dir.join("resources"),
         source_dir.join("share"),
@@ -1163,6 +1164,22 @@ fn refresh_desktop_database() {
         Ok(h) => h,
         Err(_) => return,
     };
+
+    // Clean up dangling symlinks in gitpkg's application directory which can
+    // cause "Could not parse file" errors from update-desktop-database.
+    let gitpkg_apps = Path::new(&home)
+        .join(".local/share/applications")
+        .join("gitpkg");
+    if gitpkg_apps.exists() {
+        if let Ok(entries) = fs::read_dir(&gitpkg_apps) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_symlink() && path.read_link().map_or(true, |t| !t.exists()) {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
 
     let apps_dir = Path::new(&home).join(".local/share/applications");
     let _ = Command::new("update-desktop-database")
