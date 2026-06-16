@@ -306,6 +306,7 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
         ("CMakeLists.txt", "cmake"),
         ("meson.build", "meson"),
         ("mason.toml", "mason"),
+        ("build.ninja", "ninja"),
         ("Cargo.toml", "cargo"),
         ("build.gradle", "gradle"),
         ("go.mod", "go"),
@@ -352,6 +353,46 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
                         if sub_path.is_file() && is_python_file(&sub_path) {
                             return Some("python");
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    // Check for standalone shell scripts (last resort - only if nothing else detected)
+    if let Ok(entries) = fs::read_dir(base) {
+        let files: Vec<_> = entries.flatten().filter(|e| e.path().is_file()).collect();
+
+        // First pass: check for .sh files
+        for entry in &files {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with(".") {
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) == Some("sh") {
+                return Some("sh");
+            }
+        }
+
+        // Second pass: check files without extension for shell shebang
+        for entry in &files {
+            let path = entry.path();
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name.starts_with(".") || path.extension().is_some() {
+                continue;
+            }
+            if let Ok(mut f) = std::fs::File::open(&path) {
+                let mut buf = [0u8; 64];
+                use std::io::Read;
+                if f.read_exact(&mut buf).is_ok() {
+                    let head = String::from_utf8_lossy(&buf);
+                    if head.starts_with("#!") && (head.contains("/sh") || head.contains("/bash")
+                        || head.contains("/zsh") || head.contains("/dash")
+                        || head.contains("/ksh") || head.contains("/env bash")
+                        || head.contains("/env sh"))
+                    {
+                        return Some("sh");
                     }
                 }
             }
@@ -423,7 +464,7 @@ fn build_system_packages(build_system: &str, pm: &str) -> Option<&'static str> {
     make_map.insert("apk", "build-base");
     make_map.insert("nix-env", "gcc");
 
-    for &sys in ["make", "cmake", "meson", "mason"].iter() {
+    for &sys in ["make", "cmake", "meson", "mason", "ninja"].iter() {
         map.insert(sys, make_map.clone());
     }
 
@@ -2007,6 +2048,50 @@ fn build_mason(
     build_make(temp, install_path, repo, verbose)
 }
 
+fn build_ninja(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> Option<std::process::ExitStatus> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let mut ninja_cmd = Command::new("ninja");
+    ninja_cmd.current_dir(temp);
+    if !verbose {
+        ninja_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let ninja_status = ninja_cmd.status().unwrap();
+
+    if !ninja_status.success() {
+        return Some(ninja_status);
+    }
+
+    match find_built_executable(Path::new(temp), repo, "ninja") {
+        Some(exe_path) => {
+            println!("Found executable: {}", exe_path);
+            let exe_name = Path::new(&exe_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(repo);
+            let dest = bin_dir.join(exe_name);
+            fs::copy(&exe_path, &dest).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms).unwrap();
+            Some(ninja_status)
+        }
+        None => {
+            eprintln!("Could not find executable after build");
+            eprintln!("Searched in: {}", temp);
+            eprintln!("Try running with -v flag to see build output");
+            None
+        }
+    }
+}
+
 fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> std::process::ExitStatus {
     let bin_dir = Path::new(install_path).join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
@@ -2100,8 +2185,14 @@ fn build_gradle(
     let bin_dir = Path::new(install_path).join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
 
-    let mut cmd = Command::new("gradle");
-    cmd.arg("build").current_dir(temp);
+    let mut cmd = if Path::new(temp).join("gradlew").exists() {
+        let mut c = Command::new("sh");
+        c.arg(Path::new(temp).join("gradlew"));
+        c
+    } else {
+        Command::new("gradle")
+    };
+    cmd.arg("build").arg("--no-daemon").current_dir(temp);
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -2135,6 +2226,98 @@ fn build_gradle(
     }
 
     status
+}
+
+fn build_shell(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> Option<std::process::ExitStatus> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let find_script = |temp: &str, repo: &str| -> Option<std::path::PathBuf> {
+        let base = Path::new(temp);
+
+        // Check for file named exactly <repo> (e.g. neofetch)
+        let exact = base.join(repo);
+        if exact.is_file() {
+            return Some(exact);
+        }
+
+        // Check for <repo>.sh
+        let sh = base.join(format!("{}.sh", repo));
+        if sh.is_file() {
+            return Some(sh);
+        }
+
+        // Check for any .sh file at root
+        if let Ok(entries) = fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file()
+                    && path.extension().and_then(|e| e.to_str()) == Some("sh")
+                {
+                    return Some(path);
+                }
+            }
+        }
+
+        // Check for any file without extension with shell shebang
+        if let Ok(entries) = fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() || path.extension().is_some() {
+                    continue;
+                }
+                if let Ok(mut f) = std::fs::File::open(&path) {
+                    let mut buf = [0u8; 64];
+                    use std::io::Read;
+                    if f.read_exact(&mut buf).is_ok() {
+                        let head = String::from_utf8_lossy(&buf);
+                        if head.starts_with("#!") && (head.contains("/sh")
+                            || head.contains("/bash") || head.contains("/zsh")
+                            || head.contains("/dash") || head.contains("/ksh")
+                            || head.contains("/env bash") || head.contains("/env sh"))
+                        {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    };
+
+    let script = match find_script(temp, repo) {
+        Some(s) => s,
+        None => {
+            eprintln!("Could not find shell script in {}", temp);
+            return None;
+        }
+    };
+
+    if verbose {
+        println!("Found script: {}", script.display());
+    }
+
+    let dest = bin_dir.join(repo);
+    match fs::copy(&script, &dest) {
+        Ok(_) => {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms).unwrap();
+            use std::os::unix::process::ExitStatusExt;
+            Some(std::process::ExitStatus::from_raw(0))
+        }
+        Err(e) => {
+            eprintln!("Failed to copy script: {}", e);
+            None
+        }
+    }
 }
 
 fn build_python(
@@ -2471,11 +2654,13 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>, branch: 
         "meson" => build_meson(&temp, &install_path, repo, verbose),
         "python" => build_python(&temp, &install_path, repo, verbose),
         "mason" => build_mason(&temp, &install_path, repo, verbose),
+        "ninja" => build_ninja(&temp, &install_path, repo, verbose),
         "go" => Some(build_go(&temp, &install_path, repo, verbose)),
         "npm" | "pnpm" | "yarn" => {
             Some(build_nodejs(&temp, &install_path, repo, verbose, bs))
         }
         "gradle" => Some(build_gradle(&temp, &install_path, repo, verbose)),
+        "sh" => build_shell(&temp, &install_path, repo, verbose),
         _ => {
             println!("Unsupported build system: {}", bs);
             return;
