@@ -11,7 +11,7 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     if args.len() < 2 {
         eprintln!(
-            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|change-branch|help> [args] [-v] [--supplier <domain>] [--branch <branch>]"
+            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|change-branch|help> [args] [-v] [--supplier|--provider|--host <domain>] [--branch <branch>]"
         );
         std::process::exit(1);
     }
@@ -26,8 +26,8 @@ fn main() {
             skip_next = false;
             continue;
         }
-        if arg == "-v" || arg == "--supplier" || arg == "--branch" || arg == "--shell" || arg == "-s" {
-            if *arg == "--supplier" || *arg == "--branch" {
+        if arg == "-v" || arg == "--supplier" || arg == "--provider" || arg == "--host" || arg == "--branch" || arg == "--shell" || arg == "-s" {
+            if *arg == "--supplier" || *arg == "--provider" || *arg == "--host" || *arg == "--branch" {
                 skip_next = true;
             }
             continue;
@@ -36,16 +36,18 @@ fn main() {
     }
     if positional.is_empty() {
         eprintln!(
-            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|change-branch|help> [args] [-v] [--supplier <domain>] [--branch <branch>]"
+            "Usage: gitpkg <install|remove|clean|list|upgrade|update|versions|version|goto|change-branch|help> [args] [-v] [--supplier|--provider|--host <domain>] [--branch <branch>]"
         );
         std::process::exit(1);
     }
     let command = &positional[0];
 
-    // Parse --supplier flag
-    let supplier = if let Some(pos) = args.iter().position(|arg| arg == "--supplier") {
+    // Parse --supplier / --provider / --host flag
+    let supplier = if let Some(pos) =
+        args.iter().position(|arg| arg == "--supplier" || arg == "--provider" || arg == "--host")
+    {
         if pos + 1 < args.len() {
-            Some(args[pos + 1].clone())
+            Some(resolve_supplier_shortname(&args[pos + 1]))
         } else {
             eprintln!("Error: --supplier flag requires a domain argument");
             eprintln!("Example: --supplier gitlab.com");
@@ -152,7 +154,13 @@ fn main() {
         "help" | "-h" | "--help" => {
             println!("gitpkg — minimal git-based package manager");
             println!();
-            println!("Usage: gitpkg <command> [args] [-v] [--supplier <domain>] [--branch <branch>]");
+            println!("Usage: gitpkg <command> [args] [-v] [--supplier|--provider|--host <domain>] [--branch <branch>]");
+            println!();
+            println!("Shortnames for --supplier/--provider/--host:");
+            println!("  gh, github          github.com");
+            println!("  gl, gitlab          gitlab.com");
+            println!("  cb, codeberg        codeberg.org");
+            println!("  glg, gnome, ...     gitlab.gnome.org");
             println!();
             println!("Commands:");
             println!("  install <user>/<repo>       Install a package (--branch to clone specific branch)");
@@ -1471,6 +1479,18 @@ fn build_git_url(user: &str, repo: &str, supplier: Option<&str>) -> String {
     format!("https://{}/{}/{}", supplier_domain, user, repo_name)
 }
 
+fn resolve_supplier_shortname(arg: &str) -> String {
+    match arg {
+        "gh" | "github" => "github.com".to_string(),
+        "gl" | "gitlab" => "gitlab.com".to_string(),
+        "cb" | "codeberg" => "codeberg.org".to_string(),
+        "glg" | "gnome" | "gnome.gitlab" | "gnome-gitlab" | "gitlab.gnome" | "gitlab-gnome" => {
+            "gitlab.gnome.org".to_string()
+        }
+        _ => arg.to_string(),
+    }
+}
+
 fn normalize_supplier(supplier: &str) -> String {
     // Remove .com, .org, .net, etc. from supplier domain
     supplier
@@ -2687,6 +2707,33 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>, branch: 
         // Create compatibility symlinks for data directories in ~/.local/share
         // Initially copy to user directory, we'll update system-wide if /usr/bin symlink succeeds
         let data_symlinks = create_data_symlinks(Path::new(&install_path), repo, false);
+
+        // Install/update bash completion script when upgrading gitpkg itself
+        if user == "el1lovescomputers" && repo == "gitpkg" {
+            let completion_src = Path::new(&temp).join("gitpkg-completion.sh");
+            if completion_src.exists() {
+                let home = env::var("HOME").unwrap();
+                let dest_dir = Path::new(&home).join(".local/share/gitpkg");
+                let dest = dest_dir.join("gitpkg-completion.sh");
+                let _ = fs::create_dir_all(&dest_dir);
+                match fs::copy(&completion_src, &dest) {
+                    Ok(_) => {
+                        println!("Installed updated completion script to {}", dest.display());
+                        let bashrc = Path::new(&home).join(".bashrc");
+                        let source_line =
+                            "source $HOME/.local/share/gitpkg/gitpkg-completion.sh";
+                        if let Ok(content) = fs::read_to_string(&bashrc) {
+                            if !content.contains(source_line) {
+                                let new_content =
+                                    format!("{}\n# gitpkg completion\n{}\n", content, source_line);
+                                let _ = fs::write(&bashrc, new_content);
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!("Failed to install completion script: {}", e),
+                }
+            }
+        }
 
         if !["npm", "pnpm", "yarn"].contains(&bs) {
             let _ = fs::remove_dir_all(&temp);
