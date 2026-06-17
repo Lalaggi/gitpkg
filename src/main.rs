@@ -3715,24 +3715,13 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
     }
     println!("Current commit: {}", current_commit);
 
-    // Clone to temp to get latest commit
+    // Check latest commit remotely without cloning
     let url = build_git_url(&user, &repo, Some(supplier_to_use));
-    let path = temp_path(&user, &repo);
 
-    if Path::new(&path).exists() {
-        fs::remove_dir_all(&path).unwrap();
-    }
-
-    if !run_git_clone_with_progress(&url, &path, verbose, stored_branch.as_deref()) {
-        eprintln!("Git clone failed");
-        return;
-    }
-
-    let latest_commit = match get_commit_hash(&path) {
+    let latest_commit = match get_remote_commit_hash(&url, stored_branch.as_deref()) {
         Some(c) => c,
         None => {
-            eprintln!("Failed to get latest commit hash");
-            let _ = fs::remove_dir_all(&path);
+            eprintln!("Failed to get latest commit hash from remote");
             return;
         }
     };
@@ -3744,13 +3733,23 @@ fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
             "{} is already up to date!",
             get_package_key(&user, &repo, &stored_supplier)
         );
-        let _ = fs::remove_dir_all(&path);
         return;
     }
 
-    println!("Update available! Building new version...");
+    println!("Update available! Cloning and building new version...");
 
-    // Build the new version (this will create a new install path with the new commit hash)
+    // Clone to temp
+    let path = temp_path(&user, &repo);
+    if Path::new(&path).exists() {
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    if !run_git_clone_with_progress(&url, &path, verbose, stored_branch.as_deref()) {
+        eprintln!("Git clone failed");
+        return;
+    }
+
+    // Build the new version
     build(&user, &repo, verbose, Some(supplier_to_use), stored_branch.as_deref());
 
     println!(
@@ -3780,6 +3779,26 @@ fn upgrade_all(verbose: bool) {
     }
 
     println!("\nAll packages checked for updates!");
+}
+
+/// Get the latest commit hash from a remote repository without cloning.
+fn get_remote_commit_hash(url: &str, branch: Option<&str>) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.arg("ls-remote");
+    match branch {
+        Some(b) => {
+            cmd.arg(url).arg(format!("refs/heads/{}", b));
+        }
+        None => {
+            cmd.arg(url).arg("HEAD");
+        }
+    }
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout.split_whitespace().next().map(|s| s.to_string())
 }
 
 fn check_branch_exists(url: &str, branch: &str, verbose: bool) -> bool {
