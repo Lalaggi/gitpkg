@@ -324,6 +324,9 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
         ("Pipfile", "python"),
         ("poetry.lock", "python"),
         ("requirements.txt", "python"),
+        ("Justfile", "just"),
+        ("justfile", "just"),
+        ("Rakefile", "rake"),
     ] {
         if base.join(file).exists() {
             return Some(sys);
@@ -332,6 +335,9 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
 
     // Check package.json separately to detect the JS package manager
     if base.join("package.json").exists() {
+        if detect_electron(path) {
+            return Some("electron");
+        }
         return Some(detect_js_package_manager(path));
     }
 
@@ -408,6 +414,23 @@ fn detect_build_system(path: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+fn detect_electron(path: &str) -> bool {
+    let base = Path::new(path);
+    let package_json = base.join("package.json");
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            let deps = json.get("dependencies").and_then(|v| v.as_object());
+            let dev_deps = json.get("devDependencies").and_then(|v| v.as_object());
+            if deps.and_then(|d| d.get("electron")).is_some()
+                || dev_deps.and_then(|d| d.get("electron")).is_some()
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn detect_js_package_manager(path: &str) -> &'static str {
@@ -494,6 +517,12 @@ fn build_system_packages(build_system: &str, pm: &str) -> Option<&'static str> {
     }
     map.insert("yarn", yarn_map);
 
+    let mut electron_map = HashMap::new();
+    for &p in ["apt", "dnf", "yum", "pacman", "zypper", "apk", "nix-env"].iter() {
+        electron_map.insert(p, "nodejs npm");
+    }
+    map.insert("electron", electron_map);
+
     let mut gradle_map = HashMap::new();
     for &p in ["apt", "dnf", "yum", "pacman", "zypper", "apk", "nix-env"].iter() {
         gradle_map.insert(p, "gradle");
@@ -505,6 +534,22 @@ fn build_system_packages(build_system: &str, pm: &str) -> Option<&'static str> {
         python_map.insert(p, "python");
     }
     map.insert("python", python_map);
+
+    let mut just_map = HashMap::new();
+    just_map.insert("apt", "just");
+    just_map.insert("dnf", "just");
+    just_map.insert("yum", "just");
+    just_map.insert("pacman", "just");
+    just_map.insert("zypper", "just");
+    just_map.insert("apk", "just");
+    just_map.insert("nix-env", "just");
+    map.insert("just", just_map);
+
+    let mut rake_map = HashMap::new();
+    for &p in ["apt", "dnf", "yum", "pacman", "zypper", "apk", "nix-env"].iter() {
+        rake_map.insert(p, if p == "apt" { "ruby" } else { "ruby" });
+    }
+    map.insert("rake", rake_map);
 
     map.get(build_system)?.get(pm).copied()
 }
@@ -1794,7 +1839,7 @@ fn install(package: &str, verbose: bool, supplier: Option<&str>, branch: Option<
     // Install compiler if missing (skip for python - handled above)
     if let Some(comp) = compiler {
         // For pnpm/yarn, check for node instead of the package manager binary
-        let check_bin = if bs == "pnpm" || bs == "yarn" { "node" } else { bs };
+        let check_bin = if bs == "pnpm" || bs == "yarn" || bs == "electron" { "node" } else { bs };
         if !is_installed(check_bin) {
             println!("Installing {} for {} via {}...", comp, bs, pm);
             let status = match pm {
@@ -2127,6 +2172,92 @@ fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> std::p
     cmd.status().unwrap()
 }
 
+fn build_just(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    // Try running the default recipe first
+    let mut cmd = Command::new("just");
+    cmd.current_dir(temp);
+    if !verbose {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let status = cmd.status().unwrap();
+
+    if !status.success() {
+        return Some(status);
+    }
+
+    // Find built executables
+    match find_built_executable(Path::new(temp), repo, "just") {
+        Some(exe_path) => {
+            if verbose {
+                println!("Found executable: {}", exe_path);
+            }
+            let exe_name = Path::new(&exe_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(repo);
+            let dest = bin_dir.join(exe_name);
+            fs::copy(&exe_path, &dest).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms).unwrap();
+            Some(status)
+        }
+        None => {
+            eprintln!("Could not find executable after build");
+            eprintln!("Searched in: {}", temp);
+            eprintln!("Try running with -v flag to see build output");
+            None
+        }
+    }
+}
+
+fn build_rake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    // Try running the default rake task
+    let mut cmd = Command::new("rake");
+    cmd.current_dir(temp);
+    if !verbose {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let status = cmd.status().unwrap();
+
+    if !status.success() {
+        return Some(status);
+    }
+
+    // Find built executables
+    match find_built_executable(Path::new(temp), repo, "rake") {
+        Some(exe_path) => {
+            if verbose {
+                println!("Found executable: {}", exe_path);
+            }
+            let exe_name = Path::new(&exe_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(repo);
+            let dest = bin_dir.join(exe_name);
+            fs::copy(&exe_path, &dest).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms).unwrap();
+            Some(status)
+        }
+        None => {
+            eprintln!("Could not find executable after build");
+            eprintln!("Searched in: {}", temp);
+            eprintln!("Try running with -v flag to see build output");
+            None
+        }
+    }
+}
+
 fn build_nodejs(
     temp: &str,
     install_path: &str,
@@ -2149,12 +2280,27 @@ fn build_nodejs(
         return install_status;
     }
 
-    let mut build_cmd = Command::new(js_pm);
-    build_cmd.arg("run").arg("build").current_dir(temp);
-    if !verbose {
-        build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let package_json_path = Path::new(temp).join("package.json");
+    let has_build_script = fs::read_to_string(&package_json_path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .map(|j| {
+            j.get("scripts")
+                .and_then(|s| s.get("build"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .is_some()
+        })
+        .unwrap_or(false);
+
+    if has_build_script {
+        let mut build_cmd = Command::new(js_pm);
+        build_cmd.arg("run").arg("build").current_dir(temp);
+        if !verbose {
+            build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let _ = build_cmd.status();
     }
-    let _ = build_cmd.status();
 
     // Try to find the main entry point or built files
     let package_json = Path::new(temp).join("package.json");
@@ -2193,6 +2339,84 @@ fn build_nodejs(
     }
 
     println!("Note: {} package installed at {}", js_pm, install_path);
+    install_status
+}
+
+fn build_electron(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> std::process::ExitStatus {
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+
+    let js_pm = detect_js_package_manager(temp);
+
+    let mut install_cmd = Command::new(js_pm);
+    install_cmd.arg("install").current_dir(temp);
+    if !verbose {
+        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let install_status = install_cmd.status().unwrap();
+
+    if !install_status.success() {
+        return install_status;
+    }
+
+    // Try to run build scripts in priority order
+    let package_json = Path::new(temp).join("package.json");
+    let build_scripts = ["build:app", "build:web", "build:electron", "build"];
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            let scripts = json.get("scripts").and_then(|v| v.as_object());
+            for script in &build_scripts {
+                if scripts
+                    .and_then(|s| s.get(*script))
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                {
+                    let mut build_cmd = Command::new(js_pm);
+                    build_cmd.arg("run").arg(script).current_dir(temp);
+                    if !verbose {
+                        build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                    }
+                    let _ = build_cmd.status();
+                }
+            }
+        }
+    }
+
+    // Read main entry before moving
+    let main_entry = fs::read_to_string(&package_json)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| j.get("main").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+    // Move the electron app from temp to install_path/electron/
+    let electron_dir = Path::new(install_path).join("electron");
+    if electron_dir.exists() {
+        fs::remove_dir_all(&electron_dir).unwrap();
+    }
+    fs::create_dir_all(electron_dir.parent().unwrap()).unwrap();
+    fs::rename(temp, &electron_dir).unwrap();
+
+    // Create shell wrapper that launches electron with the app
+    if let Some(main) = main_entry {
+        let src = electron_dir.join(&main);
+        let dest = bin_dir.join(repo);
+        let wrapper = format!(
+            "#!/bin/sh\n# Edit flags below if electron has display issues (e.g. NVIDIA on Wayland)\nexec electron {} \"$@\"\n",
+            src.display()
+        );
+        fs::write(&dest, wrapper).unwrap();
+        let mut perms = fs::metadata(&dest).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&dest, perms).unwrap();
+    }
+
+    println!("Note: electron package installed at {}", install_path);
     install_status
 }
 
@@ -2679,8 +2903,11 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>, branch: 
         "npm" | "pnpm" | "yarn" => {
             Some(build_nodejs(&temp, &install_path, repo, verbose, bs))
         }
+        "electron" => Some(build_electron(&temp, &install_path, repo, verbose)),
         "gradle" => Some(build_gradle(&temp, &install_path, repo, verbose)),
         "sh" => build_shell(&temp, &install_path, repo, verbose),
+        "just" => build_just(&temp, &install_path, repo, verbose),
+        "rake" => build_rake(&temp, &install_path, repo, verbose),
         _ => {
             println!("Unsupported build system: {}", bs);
             return;
@@ -2699,7 +2926,12 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>, branch: 
         println!("Installed to {}", install_path);
 
         // Install data files (resources, schemas, etc.) for GTK/GLib apps
-        let data_files = install_data_files(Path::new(&temp), Path::new(&install_path), repo);
+        let src_dir = if bs == "electron" {
+            Path::new(&install_path).join("electron")
+        } else {
+            Path::new(&temp).to_path_buf()
+        };
+        let data_files = install_data_files(&src_dir, Path::new(&install_path), repo);
         if !data_files.is_empty() {
             println!("Installed {} data file(s)", data_files.len());
         }
@@ -2735,7 +2967,7 @@ fn build(user: &str, repo: &str, verbose: bool, supplier: Option<&str>, branch: 
             }
         }
 
-        if !["npm", "pnpm", "yarn"].contains(&bs) {
+        if !["npm", "pnpm", "yarn", "electron"].contains(&bs) {
             let _ = fs::remove_dir_all(&temp);
         }
 
