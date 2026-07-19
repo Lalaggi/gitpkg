@@ -130,7 +130,7 @@ pub fn build(
     system_wide: bool,
     installed_deps: &[String],
     remote_url: Option<&str>,
-) {
+) -> bool {
     let temp = temp_path(user, repo);
     let commit = get_commit_hash(&temp).unwrap_or_else(|| "unknown".to_string());
     let supplier_domain = supplier.unwrap_or("github.com");
@@ -142,7 +142,7 @@ pub fn build(
         Some(s) => s,
         None => {
             println!("No build system detected");
-            return;
+            return false;
         }
     };
     println!("Building {} with {}", repo, bs);
@@ -166,7 +166,7 @@ pub fn build(
         "rake" => build_rake(&temp, &install_path, repo, verbose),
         _ => {
             println!("Unsupported build system: {}", bs);
-            return;
+            return false;
         }
     };
 
@@ -174,7 +174,7 @@ pub fn build(
         Some(s) => s,
         None => {
             println!("Build failed for {}", repo);
-            return;
+            return false;
         }
     };
 
@@ -442,8 +442,10 @@ exec {} "$@"
         refresh_desktop_database();
 
         println!("Metadata written to info.gitpkg");
+        return true;
     } else {
         println!("Build failed for {}", repo);
+        return false;
     }
 }
 
@@ -1172,7 +1174,7 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         })
         .unwrap_or_default();
 
-    build(
+    let built = build(
         &user,
         &repo,
         verbose,
@@ -1184,6 +1186,14 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         &stored_deps,
         stored_remote.as_deref(),
     );
+
+    if !built {
+        eprintln!(
+            "Failed to upgrade {} (build failed)",
+            crate::package::get_package_key(&user, &repo, &stored_supplier)
+        );
+        return;
+    }
 
     println!(
         "Successfully upgraded {} from {} to {}",
@@ -1347,7 +1357,7 @@ pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplie
         return;
     }
 
-    build(
+    let built = build(
         &user,
         &repo,
         verbose,
@@ -1359,6 +1369,11 @@ pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplie
         &stored_deps,
         stored_remote.as_deref(),
     );
+
+    if !built {
+        eprintln!("Failed to switch {} to branch '{}' (build failed)", pkg_key, new_branch);
+        return;
+    }
 
     println!("Successfully switched {} to branch '{}'", pkg_key, new_branch);
 }
