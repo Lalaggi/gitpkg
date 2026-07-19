@@ -1,0 +1,1364 @@
+use std::env;
+use std::fs;
+use std::path::Path;
+use std::process::Command;
+
+use crate::build::{
+    build_cargo, build_cmake, build_electron, build_go, build_gradle, build_just,
+    build_make, build_mason, build_meson, build_nodejs, build_ninja, build_python, build_rake,
+    build_shell, find_installed_executable,
+};
+use crate::cli::{
+    build_git_url_with, detect_package_manager, get_remote_url, install_system_package,
+    is_installed, remove_system_package,
+};
+use crate::data::{
+    create_data_symlinks, create_desktop_symlinks, install_data_files,
+    refresh_desktop_database,
+};
+use crate::detect::{build_system_packages, detect_build_system};
+use crate::git::{
+    check_branch_exists, get_commit_hash, get_remote_commit_hash,
+    run_git_clone_with_progress,
+};
+use crate::package::{
+    find_matching_packages, find_package_by_key, home_dir, install_root,
+    parse_pkg, parse_pkg_with_supplier, prompt_package_selection, read_package_list,
+    remove_from_package_list, temp_path, write_info as write_info_file,
+};
+use crate::util::{dir_size_bytes, format_mb};
+
+pub fn install(
+    package: &str,
+    verbose: bool,
+    supplier: Option<&str>,
+    branch: Option<&str>,
+    config: &crate::build::BuildConfig,
+    submodules: bool,
+    ssh: bool,
+    system_wide: bool,
+) {
+    let (user, repo) = parse_pkg(package);
+    let url = build_git_url_with(&user, &repo, supplier, ssh, None);
+    let supplier_domain = supplier.unwrap_or("github.com");
+
+    let path = temp_path(&user, &repo);
+    if Path::new(&path).exists() {
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    println!("Cloning {} from {} into {}", package, supplier_domain, path);
+    if !run_git_clone_with_progress(&url, &path, verbose, branch, submodules) {
+        eprintln!("Git clone failed");
+        return;
+    }
+    println!("Successfully cloned {}!", package);
+
+    let bs = match detect_build_system(&path) {
+        Some(s) => s,
+        None => {
+            println!("Could not detect build system");
+            return;
+        }
+    };
+    let pm = match detect_package_manager() {
+        Some(p) => p,
+        None => {
+            println!("No package manager detected");
+            return;
+        }
+    };
+
+    let mut installed_deps: Vec<String> = Vec::new();
+
+    let compiler = if bs == "python" {
+        if is_installed("python3") || is_installed("python") {
+            None
+        } else {
+            println!("Python not found, attempting to install via {}...", pm);
+            if !install_system_package(pm, "python3") {
+                eprintln!("Failed installing python");
+                return;
+            }
+            installed_deps.push("python3".to_string());
+            None
+        }
+    } else {
+        Some(match build_system_packages(bs, pm) {
+            Some(c) => c,
+            None => {
+                println!("No compiler mapping for {} on {}", bs, pm);
+                return;
+            }
+        })
+    };
+
+    if let Some(comp) = compiler {
+        let check_bin = if bs == "pnpm" || bs == "yarn" || bs == "electron" { "node" } else { bs };
+        if !is_installed(check_bin) {
+            println!("Installing {} for {} via {}...", comp, bs, pm);
+            if !install_system_package(pm, comp) {
+                eprintln!("Failed installing {}", comp);
+                return;
+            }
+            installed_deps.push(comp.to_string());
+        }
+    }
+
+    build(
+        &user,
+        &repo,
+        verbose,
+        Some(supplier_domain),
+        branch,
+        config,
+        ssh,
+        system_wide,
+        &installed_deps,
+        None,
+    );
+}
+
+pub fn build(
+    user: &str,
+    repo: &str,
+    verbose: bool,
+    supplier: Option<&str>,
+    branch: Option<&str>,
+    config: &crate::build::BuildConfig,
+    _ssh: bool,
+    system_wide: bool,
+    installed_deps: &[String],
+    remote_url: Option<&str>,
+) {
+    let temp = temp_path(user, repo);
+    let commit = get_commit_hash(&temp).unwrap_or_else(|| "unknown".to_string());
+    let supplier_domain = supplier.unwrap_or("github.com");
+    let install_path = install_root(user, repo, &commit, supplier_domain);
+    let pkg_key = crate::package::get_package_key(user, repo, supplier_domain);
+    fs::create_dir_all(&install_path).unwrap();
+
+    let bs = match detect_build_system(&temp) {
+        Some(s) => s,
+        None => {
+            println!("No build system detected");
+            return;
+        }
+    };
+    println!("Building {} with {}", repo, bs);
+
+    let status = match bs {
+        "cargo" => Some(build_cargo(&temp, &install_path, verbose)),
+        "make" => build_make(&temp, &install_path, repo, verbose, config),
+        "cmake" => build_cmake(&temp, &install_path, repo, verbose, config),
+        "meson" => build_meson(&temp, &install_path, repo, verbose),
+        "python" => build_python(&temp, &install_path, repo, verbose),
+        "mason" => build_mason(&temp, &install_path, repo, verbose),
+        "ninja" => build_ninja(&temp, &install_path, repo, verbose),
+        "go" => Some(build_go(&temp, &install_path, repo, verbose)),
+        "npm" | "pnpm" | "yarn" => {
+            Some(build_nodejs(&temp, &install_path, repo, verbose, bs))
+        }
+        "electron" => Some(build_electron(&temp, &install_path, repo, verbose)),
+        "gradle" => Some(build_gradle(&temp, &install_path, repo, verbose)),
+        "sh" => build_shell(&temp, &install_path, repo, verbose),
+        "just" => build_just(&temp, &install_path, repo, verbose),
+        "rake" => build_rake(&temp, &install_path, repo, verbose),
+        _ => {
+            println!("Unsupported build system: {}", bs);
+            return;
+        }
+    };
+
+    let status = match status {
+        Some(s) => s,
+        None => {
+            println!("Build failed for {}", repo);
+            return;
+        }
+    };
+
+    if status.success() {
+        println!("Installed to {}", install_path);
+
+        let src_dir = if bs == "electron" {
+            Path::new(&install_path).join("electron")
+        } else {
+            Path::new(&temp).to_path_buf()
+        };
+        let data_files = install_data_files(&src_dir, Path::new(&install_path), repo);
+        if !data_files.is_empty() {
+            println!("Installed {} data file(s)", data_files.len());
+        }
+
+        let data_symlinks = create_data_symlinks(Path::new(&install_path), repo, false);
+
+        if user == "el1lovescomputers" && repo == "gitpkg" {
+            if let Some(home) = home_dir() {
+                let completion_src = Path::new(&temp).join("gitpkg-completion.sh");
+                if completion_src.exists() {
+                    let dest_dir = home.join(".local/share/gitpkg");
+                    let dest = dest_dir.join("gitpkg-completion.sh");
+                    let _ = fs::create_dir_all(&dest_dir);
+                    match fs::copy(&completion_src, &dest) {
+                        Ok(_) => {
+                            println!("Installed updated completion script to {}", dest.display());
+                            let bashrc = home.join(".bashrc");
+                            let source_line =
+                                "source $HOME/.local/share/gitpkg/gitpkg-completion.sh";
+                            if let Ok(content) = fs::read_to_string(&bashrc) {
+                                if !content.contains(source_line) {
+                                    let new_content = format!(
+                                        "{}\n# gitpkg completion\n{}\n",
+                                        content, source_line
+                                    );
+                                    let _ = fs::write(&bashrc, new_content);
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!("Failed to install completion script: {}", e),
+                    }
+                }
+            }
+        }
+
+        if !["npm", "pnpm", "yarn", "electron"].contains(&bs) {
+            let _ = fs::remove_dir_all(&temp);
+        }
+
+        // Always tie the symlink to the actual detected binary, with the repo
+        // name only as a last-resort fallback. This fixes installs where the
+        // Cargo/package binary name differs from the repo name.
+        let exe_path = match find_installed_executable(Path::new(&install_path), repo) {
+            Some(p) => p,
+            None => Path::new(&install_path).join("bin").join(repo),
+        };
+        let exe_name = exe_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(repo)
+            .to_string();
+
+        // Decide where the symlink goes. Default to the user dir
+        // (~/.local/bin, no sudo). Only use /usr/bin when the user explicitly
+        // passed --system AND sudo auth succeeds.
+        let symlink_dir: Option<std::path::PathBuf> = if system_wide {
+            if crate::cli::superuser_auth() {
+                Some(Path::new("/usr/bin").to_path_buf())
+            } else {
+                eprintln!(
+                    "Warning: --system requested but {} authentication failed.",
+                    crate::cli::superuser().program()
+                );
+                eprintln!("Falling back to ~/.local/bin (no superuser).");
+                home_dir().map(|h| h.join(".local/bin"))
+            }
+        } else {
+            home_dir().map(|h| h.join(".local/bin"))
+        };
+
+        let (symlink_created, symlink_path) = match symlink_dir {
+            Some(dir) => {
+                let is_system = dir.starts_with("/usr");
+                fs::create_dir_all(&dir).unwrap();
+                let target = dir.join(&exe_name);
+
+                // Refuse to clobber an existing non-symlink.
+                if target.exists() && !target.is_symlink() {
+                    eprintln!(
+                        "Refusing to overwrite existing non-symlink at {}. Remove it manually.",
+                        target.display()
+                    );
+                    (false, target)
+                } else {
+                    let _ = fs::remove_file(&target);
+                    let ok = if is_system {
+                        let target_s = target.to_str().unwrap_or("");
+                        let exe_s = exe_path.to_str().unwrap_or("");
+                        let _ = crate::cli::run_as(&["rm", "-f", target_s]);
+                        crate::cli::run_as(&["ln", "-s", exe_s, target_s])
+                            .map(|s| s.success())
+                            .unwrap_or(false)
+                    } else {
+                        std::os::unix::fs::symlink(&exe_path, &target).is_ok()
+                    };
+
+                    if ok {
+                        println!("Created symlink: {} -> {}", target.display(), exe_path.display());
+                        if !is_system {
+                            println!("Note: Make sure ~/.local/bin is in your PATH");
+                            println!("Add this to your ~/.bashrc or ~/.zshrc:");
+                            println!("  export PATH=\"$HOME/.local/bin:$PATH\"");
+                        }
+                        (true, target)
+                    } else {
+                        eprintln!("Failed to create symlink at {}", target.display());
+                        (false, target)
+                    }
+                }
+            }
+            None => {
+                eprintln!("Error: HOME is not set; cannot create symlink.");
+                (false, Path::new("").to_path_buf())
+            }
+        };
+
+        if symlink_created && system_wide {
+            println!("Copying icons to system location...");
+            let _ = create_data_symlinks(Path::new(&install_path), repo, true);
+        }
+
+        let needs_wrapper = !data_files.is_empty();
+        let wrapper_path = if needs_wrapper {
+            let wp = Path::new(&install_path)
+                .join("bin")
+                .join(format!("{}-wrapper", exe_name));
+            let gresource_path = Path::new(&install_path).join("share").join(repo);
+            let schema_dir = Path::new(&install_path)
+                .join("share")
+                .join("glib-2.0")
+                .join("schemas");
+
+            let wrapper_content = format!(
+                r#"#!/bin/bash
+# Wrapper for {} - sets up resource paths
+export GITPKG_PACKAGE_ROOT="{}"
+export GRESOURCE_PATH="{}:$GRESOURCE_PATH"
+export XDG_DATA_DIRS="{}:$XDG_DATA_DIRS"
+export GSETTINGS_SCHEMA_DIR="{}:$GSETTINGS_SCHEMA_DIR"
+exec {} "$@"
+"#,
+                repo,
+                install_path,
+                gresource_path.display(),
+                Path::new(&install_path).join("share").display(),
+                schema_dir.display(),
+                exe_path.display()
+            );
+
+            fs::write(&wp, wrapper_content).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&wp).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&wp, perms).unwrap();
+            Some(wp)
+        } else {
+            None
+        };
+
+        // If a wrapper is needed, point the symlink at the wrapper instead.
+        let final_exe_path = if let Some(ref wp) = wrapper_path {
+            if symlink_created {
+                let is_system = symlink_path.starts_with("/usr");
+                let _ = fs::remove_file(&symlink_path);
+                let ok = if is_system {
+                    let link_s = symlink_path.to_str().unwrap_or("");
+                    let wp_s = wp.to_str().unwrap_or("");
+                    let _ = crate::cli::run_as(&["rm", "-f", link_s]);
+                    crate::cli::run_as(&["ln", "-s", wp_s, link_s])
+                        .map(|s| s.success())
+                        .unwrap_or(false)
+                } else {
+                    std::os::unix::fs::symlink(wp, &symlink_path).is_ok()
+                };
+                if !ok {
+                    eprintln!(
+                        "Warning: failed to repoint symlink {} to wrapper.",
+                        symlink_path.display()
+                    );
+                }
+            }
+            wp.clone()
+        } else {
+            exe_path.clone()
+        };
+
+        if !symlink_created {
+            println!(
+                "You can run the executable directly at: {}",
+                final_exe_path.display()
+            );
+        }
+
+        let final_symlink_path = symlink_path.to_string_lossy().into_owned();
+
+        let mut desktop_path = None;
+        let desktop_file_src = Path::new(&install_path)
+            .join("share")
+            .join("applications")
+            .join(format!("{}.desktop", repo));
+        if desktop_file_src.exists() {
+            if let Some(home) = home_dir() {
+                let desktop_file_dst = home
+                    .join(".local/share/applications")
+                    .join(format!("gitpkg.{}.{}.desktop", user, repo));
+                fs::create_dir_all(desktop_file_dst.parent().unwrap()).unwrap();
+                let content = fs::read_to_string(&desktop_file_src).unwrap();
+                let new_content = content
+                    .lines()
+                    .map(|l| {
+                        if l.starts_with("Exec=") {
+                            format!("Exec={}", final_exe_path.to_str().unwrap())
+                        } else {
+                            l.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                fs::write(&desktop_file_dst, new_content).unwrap();
+                desktop_path = Some(desktop_file_dst.to_string_lossy().into_owned());
+            }
+        }
+
+        let desktop_symlinks = create_desktop_symlinks(Path::new(&install_path), &pkg_key);
+
+        // Capture the actual remote URL (preserves SSH) for future upgrades.
+        let stored_remote = remote_url
+            .map(|s| s.to_string())
+            .or_else(|| get_remote_url(&temp));
+
+        write_info_file(
+            user,
+            repo,
+            &commit,
+            bs,
+            detect_package_manager().unwrap_or("unknown"),
+            &install_path,
+            &final_symlink_path,
+            desktop_path.as_deref(),
+            supplier_domain,
+            !data_files.is_empty(),
+            &data_symlinks,
+            &desktop_symlinks,
+            branch,
+            config.make_target.as_deref(),
+            config.build_flags.as_deref(),
+            config.submodules,
+            system_wide,
+            installed_deps,
+            stored_remote.as_deref(),
+        );
+
+        refresh_desktop_database();
+
+        println!("Metadata written to info.gitpkg");
+    } else {
+        println!("Build failed for {}", repo);
+    }
+}
+
+pub fn remove(package: &str, remove_deps: bool) {
+    let (user, repo) = parse_pkg(package);
+
+    let matches = find_matching_packages(&user, &repo);
+
+    if matches.is_empty() {
+        eprintln!("Package {}/{} is not installed", user, repo);
+        return;
+    }
+
+    let (pkg_key, supplier, info_path) = if matches.len() > 1 {
+        match prompt_package_selection(&matches) {
+            Some(idx) => matches[idx].clone(),
+            None => {
+                eprintln!("Invalid selection");
+                return;
+            }
+        }
+    } else {
+        matches[0].clone()
+    };
+
+    println!("Removing {} from {}...", pkg_key, supplier);
+
+    let info_content = match fs::read_to_string(&info_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to read info file: {}", e);
+            return;
+        }
+    };
+
+    let info: toml::Value = match toml::from_str(&info_content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to parse info file: {}", e);
+            return;
+        }
+    };
+
+    if let Some(symlink_path) = info.get("symlink_path").and_then(|v| v.as_str()) {
+        if Path::new(symlink_path).exists() {
+            let removed = if fs::remove_file(symlink_path).is_ok() {
+                true
+            } else {
+                // Root-owned symlink (e.g. /usr/bin): try the superuser
+                // provider explicitly.
+                crate::cli::run_as(&["rm", "-f", symlink_path])
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            };
+            if removed {
+                println!("Removed symlink: {}", symlink_path);
+            } else {
+                eprintln!(
+                    "WARNING: could not remove symlink {}. Remove it manually.",
+                    symlink_path
+                );
+            }
+        }
+    }
+
+    if remove_deps {
+        if let Some(deps) = info.get("system_deps").and_then(|v| v.as_array()) {
+            let pm = info
+                .get("package_manager")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
+            for dep in deps {
+                if let Some(dep_name) = dep.as_str() {
+                    println!("Removing system dependency: {}", dep_name);
+                    if !remove_system_package(pm, dep_name) {
+                        eprintln!("WARNING: failed to remove system dependency {}", dep_name);
+                    }
+                }
+            }
+        }
+    } else if let Some(deps) = info.get("system_deps").and_then(|v| v.as_array()) {
+        let names: Vec<&str> = deps.iter().filter_map(|d| d.as_str()).collect();
+        if !names.is_empty() {
+            println!(
+                "Left {} system dependencies installed: {}",
+                names.len(),
+                names.join(", ")
+            );
+            println!("Re-run with --remove-deps to remove them.");
+        }
+    }
+
+    if let Some(desktop_path) = info.get("desktop_file").and_then(|v| v.as_str()) {
+        if Path::new(desktop_path).exists() {
+            match fs::remove_file(desktop_path) {
+                Ok(_) => println!("Removed desktop file: {}", desktop_path),
+                Err(e) => eprintln!("Failed to remove desktop file {}: {}", desktop_path, e),
+            }
+        }
+    }
+
+    if let Some(data_symlinks) = info.get("data_symlinks").and_then(|v| v.as_array()) {
+        for entry in data_symlinks {
+            if let Some(path_str) = entry.as_str() {
+                let p = Path::new(path_str);
+                if p.exists() {
+                    match fs::remove_file(p) {
+                        Ok(_) => println!("Removed data symlink: {}", p.display()),
+                        Err(e) => eprintln!("Failed to remove data symlink {}: {}", p.display(), e),
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(desktop_symlinks) = info.get("desktop_symlinks").and_then(|v| v.as_array()) {
+        for entry in desktop_symlinks {
+            if let Some(path_str) = entry.as_str() {
+                let p = Path::new(path_str);
+                if p.exists() {
+                    match fs::remove_file(p) {
+                        Ok(_) => println!("Removed desktop symlink: {}", p.display()),
+                        Err(e) => {
+                            eprintln!("Failed to remove desktop symlink {}: {}", p.display(), e)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let package_dir = match home_dir() {
+        Some(h) => h
+            .join(".local/share/gitpkg")
+            .join(&pkg_key)
+            .to_string_lossy()
+            .into_owned(),
+        None => {
+            eprintln!("Error: HOME not set; cannot remove installation directory.");
+            return;
+        }
+    };
+
+    if Path::new(&package_dir).exists() {
+        match fs::remove_dir_all(&package_dir) {
+            Ok(_) => println!("Removed installation directory: {}", package_dir),
+            Err(e) => eprintln!(
+                "Failed to remove installation directory {}: {}",
+                package_dir, e
+            ),
+        }
+    }
+
+    let temp = temp_path(&user, &repo);
+    if Path::new(&temp).exists() {
+        let _ = fs::remove_dir_all(&temp);
+    }
+
+    remove_from_package_list(&pkg_key);
+
+    println!("Successfully removed {}", pkg_key);
+}
+
+pub fn goto(package: &str, spawn_shell: bool) {
+    let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
+
+    let exact_match = find_package_by_key(package);
+
+    let (pkg_key, _supplier, info_path) = if let Some(m) = exact_match {
+        m
+    } else {
+        let matches = find_matching_packages(&user, &repo);
+        if matches.is_empty() {
+            eprintln!("Package {} is not installed", package);
+            return;
+        }
+
+        let selected = if let Some(ref sup) = supplier_hint {
+            matches.iter().position(|(_, s, _)| s == sup).unwrap_or(0)
+        } else if matches.len() > 1 {
+            match prompt_package_selection(&matches) {
+                Some(idx) => idx,
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+
+        matches[selected].clone()
+    };
+
+    let info_content = match fs::read_to_string(&info_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to read info file: {}", e);
+            return;
+        }
+    };
+
+    let info: toml::Value = match toml::from_str(&info_content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to parse info file: {}", e);
+            return;
+        }
+    };
+
+    let install_path = match info.get("install_path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => {
+            eprintln!("No install_path found for {}", pkg_key);
+            return;
+        }
+    };
+
+    if spawn_shell {
+        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
+        println!("Spawning shell {} at {}", shell, install_path);
+        let status = Command::new(shell).current_dir(install_path).status();
+        if let Err(e) = status {
+            eprintln!("Failed to spawn shell: {}", e);
+        }
+    } else {
+        println!("{}", install_path);
+    }
+}
+
+pub fn clean(package: &str) {
+    let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
+
+    let exact_match = find_package_by_key(package);
+
+    let (pkg_key, supplier, info_path) = if let Some(m) = exact_match {
+        m
+    } else {
+        let matches = find_matching_packages(&user, &repo);
+
+        if matches.is_empty() {
+            println!("Package {} is not installed, nothing to clean", package);
+            return;
+        }
+
+        let selected = if let Some(ref sup) = supplier_hint {
+            matches.iter().position(|(_, s, _)| s == sup).unwrap_or(0)
+        } else if matches.len() > 1 {
+            match prompt_package_selection(&matches) {
+                Some(idx) => idx,
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+
+        matches[selected].clone()
+    };
+
+    println!(
+        "Cleaning old versions and temp files for {} from {}...",
+        pkg_key, supplier
+    );
+
+    let temp = temp_path(&user, &repo);
+    if Path::new(&temp).exists() {
+        match fs::remove_dir_all(&temp) {
+            Ok(_) => println!("Removed temp directory: {}", temp),
+            Err(e) => eprintln!("Failed to remove temp directory: {}", e),
+        }
+    }
+
+    let current_commit = if let Ok(content) = fs::read_to_string(&info_path) {
+        if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+            info.get("latest_commit")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if current_commit.is_none() {
+        println!("Could not read current version, skipping old version cleanup");
+        return;
+    }
+
+    let current_commit = current_commit.unwrap();
+    println!("Current version: {}", current_commit);
+
+    let package_dir = match home_dir() {
+        Some(h) => h
+            .join(".local/share/gitpkg")
+            .join(pkg_key)
+            .to_string_lossy()
+            .into_owned(),
+        None => {
+            eprintln!("Error: HOME not set; cannot clean old versions.");
+            return;
+        }
+    };
+
+    if let Ok(entries) = fs::read_dir(&package_dir) {
+        let mut removed_count = 0;
+        let mut freed_bytes: u64 = 0;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let dir_name = entry.file_name().to_string_lossy().to_string();
+                if dir_name != current_commit && dir_name != "info.gitpkg" {
+                    let size = dir_size_bytes(&path);
+                    println!("Removing old version: {} ({})", dir_name, format_mb(size));
+                    match fs::remove_dir_all(&path) {
+                        Ok(_) => {
+                            removed_count += 1;
+                            freed_bytes += size;
+                            println!("  Removed: {} (freed {})", path.display(), format_mb(size));
+                        }
+                        Err(e) => eprintln!("  Failed to remove {}: {}", path.display(), e),
+                    }
+                }
+            }
+        }
+
+        if removed_count > 0 {
+            println!(
+                "Removed {} old version(s), freed {}",
+                removed_count,
+                format_mb(freed_bytes)
+            );
+        } else {
+            println!("No old versions to clean");
+        }
+    }
+}
+
+pub fn clean_all() {
+    println!("Cleaning all temp files and old versions...");
+
+    let gitpkg_dir = match home_dir() {
+        Some(h) => h.join(".local/share/gitpkg").to_string_lossy().into_owned(),
+        None => {
+            eprintln!("Error: HOME not set; cannot clean.");
+            return;
+        }
+    };
+
+    let temp_dir = Path::new(&gitpkg_dir).join("temp");
+    if temp_dir.exists() {
+        match fs::remove_dir_all(&temp_dir) {
+            Ok(_) => {
+                println!("Removed all temp files");
+                let _ = fs::create_dir_all(&temp_dir);
+            }
+            Err(e) => eprintln!("Failed to remove temp directory: {}", e),
+        }
+    }
+
+    let packages = read_package_list();
+
+    if packages.is_empty() {
+        println!("No packages installed");
+        return;
+    }
+
+    println!("Cleaning old versions for {} package(s)...", packages.len());
+    let mut keys: Vec<_> = packages.keys().cloned().collect();
+    keys.sort();
+    for package in keys {
+        println!("\n--- Cleaning {} ---", package);
+        clean(&package);
+    }
+
+    println!("\nCleanup complete!");
+}
+
+pub fn list() {
+    let packages = read_package_list();
+
+    if packages.is_empty() {
+        println!("No packages installed");
+        return;
+    }
+
+    println!("Installed packages:");
+    println!("{:-<60}", "");
+
+    let mut keys: Vec<_> = packages.keys().cloned().collect();
+    keys.sort();
+    for package in keys {
+        if let Some(info_path) = packages.get(&package) {
+            if let Ok(content) = fs::read_to_string(info_path) {
+                if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+                    let commit = info
+                        .get("latest_commit")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let build_sys = info
+                        .get("build_system")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let timestamp = info
+                        .get("timestamp")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown");
+                    let supplier = info
+                        .get("supplier")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("github.com");
+                    let has_data = info
+                        .get("has_data_files")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let mut size_bytes: u64 = 0;
+                    if let Some(info_parent) = Path::new(info_path).parent() {
+                        if let Ok(entries) = fs::read_dir(info_parent) {
+                            for entry in entries.flatten() {
+                                let p = entry.path();
+                                let name = entry.file_name().to_string_lossy().to_string();
+                                if name == "info.gitpkg" {
+                                    continue;
+                                }
+                                if p.is_dir() {
+                                    size_bytes += dir_size_bytes(&p);
+                                }
+                            }
+                        }
+                    }
+
+                    println!("Package:    {}", package);
+                    println!(
+                        "  Commit:   {} ({})",
+                        &commit[..commit.len().min(8)],
+                        commit
+                    );
+                    println!("  Build:    {}", build_sys);
+                    println!("  Supplier: {}", supplier);
+                    println!("  Data:     {}", if has_data { "yes" } else { "no" });
+                    println!("  Installed: {}", timestamp);
+                    println!("  Size:      {}", format_mb(size_bytes));
+                    println!();
+                } else {
+                    println!("Package:    {}", package);
+                    println!("  (Failed to read info)");
+                    println!();
+                }
+            } else {
+                println!("Package:    {}", package);
+                println!("  (Info file not found)");
+                println!();
+            }
+        }
+    }
+
+    println!("{:-<60}", "");
+    println!("Total: {} package(s)", packages.len());
+}
+
+pub fn versions(package: &str) {
+    let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
+
+    let exact_match = find_package_by_key(package);
+
+    let (pkg_key, supplier, info_path) = if let Some(m) = exact_match {
+        m
+    } else {
+        let matches = find_matching_packages(&user, &repo);
+        if matches.is_empty() {
+            println!("Package {} is not installed", package);
+            return;
+        }
+        let selected = if let Some(ref sup) = supplier_hint {
+            matches.iter().position(|(_, s, _)| s == sup).unwrap_or(0)
+        } else if matches.len() > 1 {
+            match prompt_package_selection(&matches) {
+                Some(idx) => idx,
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else {
+            0
+        };
+        matches[selected].clone()
+    };
+
+    let current_commit = if let Ok(content) = fs::read_to_string(&info_path) {
+        if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+            info.get("latest_commit")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let package_dir = match home_dir() {
+        Some(h) => h
+            .join(".local/share/gitpkg")
+            .join(&pkg_key),
+        None => {
+            eprintln!("Error: HOME not set; cannot list versions.");
+            return;
+        }
+    };
+
+    println!("Versions for {} (supplier: {})", pkg_key, supplier);
+
+    if let Ok(entries) = fs::read_dir(&package_dir) {
+        let mut rows: Vec<(String, u64, bool, Option<chrono::DateTime<chrono::Utc>>)> = Vec::new();
+        for entry in entries.flatten() {
+            let p = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == "info.gitpkg" {
+                continue;
+            }
+            if p.is_dir() {
+                let size = dir_size_bytes(&p);
+                let is_current = current_commit.as_deref() == Some(&name);
+
+                let install_dt = fs::metadata(&p)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .map(|st| chrono::DateTime::<chrono::Utc>::from(st));
+
+                rows.push((name, size, is_current, install_dt));
+            }
+        }
+
+        if rows.is_empty() {
+            println!("  (No versions found)");
+            return;
+        }
+
+        rows.sort_by(|a, b| match (&a.3, &b.3) {
+            (Some(x), Some(y)) => x.cmp(y),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.0.cmp(&b.0),
+        });
+
+        if let Some(pos) = rows.iter().position(|r| r.2) {
+            let cur = rows.remove(pos);
+            rows.push(cur);
+        }
+
+        for (name, size, is_current, install_dt) in rows {
+            let dt_str = install_dt
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_else(|| "unknown".to_string());
+            if is_current {
+                println!("* {}  {}  {}  (current)", name, format_mb(size), dt_str);
+            } else {
+                println!("  {}  {}  {}", name, format_mb(size), dt_str);
+            }
+        }
+    } else {
+        println!("No versions found for {}", pkg_key);
+    }
+}
+
+pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
+    let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/')
+    {
+        match find_package_by_key(package) {
+            Some((_pkg_key, sup, path)) => {
+                let (u, r) = parse_pkg(package);
+                (u, r, sup, path)
+            }
+            None => {
+                eprintln!(
+                    "Package {} is not installed. Use 'install' instead.",
+                    package
+                );
+                return;
+            }
+        }
+    } else {
+        let (user, repo) = parse_pkg(package);
+
+        let matches = find_matching_packages(&user, &repo);
+
+        if matches.is_empty() {
+            eprintln!(
+                "Package {}/{} is not installed. Use 'install' instead.",
+                user, repo
+            );
+            return;
+        }
+
+        let (_pkg_key, stored_supplier, info_path) = if matches.len() > 1 && supplier.is_none() {
+            match prompt_package_selection(&matches) {
+                Some(idx) => matches[idx].clone(),
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else if matches.len() > 1 && supplier.is_some() {
+            let supplier_str = supplier.unwrap();
+            match matches.iter().find(|(_, s, _)| s == supplier_str) {
+                Some(m) => m.clone(),
+                None => {
+                    eprintln!(
+                        "Package {}/{} from {} is not installed",
+                        user, repo, supplier_str
+                    );
+                    return;
+                }
+            }
+        } else {
+            matches[0].clone()
+        };
+
+        (user, repo, stored_supplier, info_path)
+    };
+
+    let info_content = match fs::read_to_string(&info_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Failed to read info file: {}", e);
+            return;
+        }
+    };
+
+    let info: toml::Value = match toml::from_str(&info_content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("Failed to parse info file: {}", e);
+            return;
+        }
+    };
+
+    let current_commit = match info.get("latest_commit").and_then(|v| v.as_str()) {
+        Some(c) => c,
+        None => {
+            eprintln!("No commit hash found in info file");
+            return;
+        }
+    };
+
+    let stored_branch = info.get("branch").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    let build_config = crate::build::BuildConfig::from_info(&info);
+
+    let supplier_to_use = supplier.unwrap_or(&stored_supplier);
+
+    let stored_remote = info
+        .get("remote_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let stored_system_wide = info
+        .get("system_wide")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    println!(
+        "Checking for updates to {} from {}...",
+        crate::package::get_package_key(&user, &repo, &stored_supplier),
+        supplier_to_use
+    );
+    if let Some(ref b) = stored_branch {
+        println!("Tracking branch: {}", b);
+    }
+    println!("Current commit: {}", current_commit);
+
+    let url = build_git_url_with(
+        &user,
+        &repo,
+        Some(supplier_to_use),
+        false,
+        stored_remote.as_deref(),
+    );
+
+    let latest_commit = match get_remote_commit_hash(&url, stored_branch.as_deref()) {
+        Some(c) => c,
+        None => {
+            eprintln!("Failed to get latest commit hash from remote");
+            return;
+        }
+    };
+
+    println!("Latest commit:  {}", latest_commit);
+
+    if current_commit == latest_commit {
+        println!(
+            "{} is already up to date!",
+            crate::package::get_package_key(&user, &repo, &stored_supplier)
+        );
+        return;
+    }
+
+    println!("Update available! Cloning and building new version...");
+
+    let path = temp_path(&user, &repo);
+    if Path::new(&path).exists() {
+        fs::remove_dir_all(&path).unwrap();
+    }
+
+    if !run_git_clone_with_progress(
+        &url,
+        &path,
+        verbose,
+        stored_branch.as_deref(),
+        build_config.submodules,
+    ) {
+        eprintln!("Git clone failed");
+        return;
+    }
+
+    let stored_deps: Vec<String> = info
+        .get("system_deps")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    build(
+        &user,
+        &repo,
+        verbose,
+        Some(supplier_to_use),
+        stored_branch.as_deref(),
+        &build_config,
+        false,
+        stored_system_wide,
+        &stored_deps,
+        stored_remote.as_deref(),
+    );
+
+    println!(
+        "Successfully upgraded {} from {} to {}",
+        crate::package::get_package_key(&user, &repo, &stored_supplier),
+        &current_commit[..8],
+        &latest_commit[..8]
+    );
+}
+
+pub fn upgrade_all(verbose: bool) {
+    let packages = read_package_list();
+
+    if packages.is_empty() {
+        println!("No packages installed");
+        return;
+    }
+
+    println!("Found {} installed package(s)", packages.len());
+
+    let mut keys: Vec<_> = packages.keys().cloned().collect();
+    keys.sort();
+    for package in keys {
+        println!("\n--- Upgrading {} ---", package);
+        upgrade(&package, verbose, None);
+    }
+
+    println!("\nAll packages checked for updates!");
+}
+
+pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplier: Option<&str>) {
+    let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/') {
+        match find_package_by_key(package) {
+            Some((_pkg_key, sup, path)) => {
+                let (u, r) = parse_pkg(package);
+                (u, r, sup, path)
+            }
+            None => {
+                eprintln!("Package {} is not installed.", package);
+                return;
+            }
+        }
+    } else {
+        let (u, r) = parse_pkg(package);
+        let matches = find_matching_packages(&u, &r);
+        if matches.is_empty() {
+            eprintln!("Package {} is not installed.", package);
+            return;
+        }
+        let (_pkg_key, sup, path) = if matches.len() > 1 && cli_supplier.is_none() {
+            match prompt_package_selection(&matches) {
+                Some(idx) => matches[idx].clone(),
+                None => {
+                    eprintln!("Invalid selection");
+                    return;
+                }
+            }
+        } else if matches.len() > 1 && cli_supplier.is_some() {
+            let sup_str = cli_supplier.unwrap();
+            match matches.iter().find(|(_, s, _)| s == sup_str) {
+                Some(m) => m.clone(),
+                None => {
+                    eprintln!("Package {}/{} from {} is not installed", u, r, sup_str);
+                    return;
+                }
+            }
+        } else {
+            matches[0].clone()
+        };
+        (u, r, sup, path)
+    };
+
+    let supplier_to_use = cli_supplier.unwrap_or(&stored_supplier);
+    let pkg_key = crate::package::get_package_key(&user, &repo, supplier_to_use);
+
+    let stored_remote = fs::read_to_string(&info_path)
+        .ok()
+        .and_then(|c| toml::from_str::<toml::Value>(&c).ok())
+        .and_then(|info| info.get("remote_url").and_then(|v| v.as_str()).map(|s| s.to_string()));
+
+    let url = build_git_url_with(
+        &user,
+        &repo,
+        Some(supplier_to_use),
+        false,
+        stored_remote.as_deref(),
+    );
+    println!("Checking if '{}' exists on remote...", new_branch);
+    if !check_branch_exists(&url, new_branch, verbose) {
+        eprintln!("Branch or tag '{}' does not exist on remote.", new_branch);
+        return;
+    }
+    println!("Ref '{}' exists!", new_branch);
+
+    let (build_config, stored_system_wide, stored_deps) = fs::read_to_string(&info_path)
+        .ok()
+        .and_then(|c| toml::from_str::<toml::Value>(&c).ok())
+        .map(|info| {
+            let cfg = crate::build::BuildConfig::from_info(&info);
+            let sw = info
+                .get("system_wide")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let deps: Vec<String> = info
+                .get("system_deps")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|d| d.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            (cfg, sw, deps)
+        })
+        .unwrap_or_default();
+
+    if let Ok(content) = fs::read_to_string(&info_path) {
+        if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+            if let Some(sp) = info.get("symlink_path").and_then(|v| v.as_str()) {
+                let p = Path::new(sp);
+                if p.exists() {
+                    let _ = fs::remove_file(p);
+                    let _ = crate::cli::run_as(&["rm", "-f", sp]);
+                }
+            }
+            if let Some(dp) = info.get("desktop_file").and_then(|v| v.as_str()) {
+                let p = Path::new(dp);
+                if p.exists() {
+                    let _ = fs::remove_file(p);
+                }
+            }
+            if let Some(arr) = info.get("data_symlinks").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    if let Some(s) = entry.as_str() {
+                        let p = Path::new(s);
+                        if p.exists() {
+                            let _ = fs::remove_file(p);
+                        }
+                    }
+                }
+            }
+            if let Some(arr) = info.get("desktop_symlinks").and_then(|v| v.as_array()) {
+                for entry in arr {
+                    if let Some(s) = entry.as_str() {
+                        let p = Path::new(s);
+                        if p.exists() {
+                            let _ = fs::remove_file(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let path = temp_path(&user, &repo);
+    if Path::new(&path).exists() {
+        fs::remove_dir_all(&path).unwrap();
+    }
+    println!("Cloning '{}'...", new_branch);
+    if !run_git_clone_with_progress(&url, &path, verbose, Some(new_branch), build_config.submodules) {
+        eprintln!("Git clone failed");
+        return;
+    }
+
+    build(
+        &user,
+        &repo,
+        verbose,
+        Some(supplier_to_use),
+        Some(new_branch),
+        &build_config,
+        false,
+        stored_system_wide,
+        &stored_deps,
+        stored_remote.as_deref(),
+    );
+
+    println!("Successfully switched {} to branch '{}'", pkg_key, new_branch);
+}
