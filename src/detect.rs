@@ -29,6 +29,8 @@ pub fn detect_build_system(path: &str) -> Option<&'static str> {
 
     for (file, sys) in [
         ("Makefile", "make"),
+        ("Justfile", "just"),
+        ("justfile", "just"),
         ("CMakeLists.txt", "cmake"),
         ("meson.build", "meson"),
         ("mason.toml", "mason"),
@@ -42,8 +44,6 @@ pub fn detect_build_system(path: &str) -> Option<&'static str> {
         ("Pipfile", "python"),
         ("poetry.lock", "python"),
         ("requirements.txt", "python"),
-        ("Justfile", "just"),
-        ("justfile", "just"),
         ("Rakefile", "rake"),
     ] {
         if base.join(file).exists() {

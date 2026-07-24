@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 
 use crate::cli::is_installed;
 use crate::detect::{detect_js_package_manager, is_python_file};
+use crate::error::GitpkgError;
 use crate::util::pascal_to_kebab_case;
 
 /// Per-package build customization. `make_target` overrides the default make
@@ -266,7 +267,7 @@ pub fn prompt_executable_selection(executables: &[String]) -> Option<String> {
     }
 
     print!("Select the main executable (1-{}): ", executables.len());
-    io::stdout().flush().unwrap();
+    io::stdout().flush().ok()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok()?;
@@ -482,7 +483,7 @@ fn cargo_uses_vendor_dir(temp: &str) -> bool {
     false
 }
 
-pub fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> std::process::ExitStatus {
+pub fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     // Projects that replace crates.io with a vendored directory source need
     // their `vendor/` populated before `cargo install` can resolve deps.
     if cargo_uses_vendor_dir(temp) {
@@ -513,7 +514,7 @@ pub fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> std::proces
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    cmd.status().unwrap()
+    Ok(Some(cmd.status()?))
 }
 
 pub fn build_make(
@@ -522,9 +523,9 @@ pub fn build_make(
     repo: &str,
     verbose: bool,
     config: &BuildConfig,
-) -> Option<std::process::ExitStatus> {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let mut make_cmd = Command::new("make");
     make_cmd.current_dir(temp);
@@ -537,10 +538,10 @@ pub fn build_make(
     if !verbose {
         make_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let make_status = make_cmd.status().unwrap();
+    let make_status = make_cmd.status()?;
 
     if !make_status.success() {
-        return Some(make_status);
+        return Ok(Some(make_status));
     }
 
     let mut extra_dirs: Vec<PathBuf> = Vec::new();
@@ -559,18 +560,18 @@ pub fn build_make(
                 .and_then(|n| n.to_str())
                 .unwrap_or(repo);
             let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest).unwrap();
+            fs::copy(&exe_path, &dest)?;
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            let mut perms = fs::metadata(&dest)?.permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms).unwrap();
-            Some(make_status)
+            fs::set_permissions(&dest, perms)?;
+            Ok(Some(make_status))
         }
         None => {
             eprintln!("Could not find executable after build");
             eprintln!("Searched in: {}", temp);
             eprintln!("Try running with -v flag to see build output");
-            None
+            Ok(None)
         }
     }
 }
@@ -581,9 +582,9 @@ pub fn build_cmake(
     repo: &str,
     verbose: bool,
     config: &BuildConfig,
-) -> Option<std::process::ExitStatus> {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let build_dir = Path::new(temp).join("build");
-    fs::create_dir_all(&build_dir).unwrap();
+    fs::create_dir_all(&build_dir)?;
 
     let mut cmake_cmd = Command::new("cmake");
     cmake_cmd
@@ -597,9 +598,9 @@ pub fn build_cmake(
         cmake_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
-    if !cmake_cmd.status().unwrap().success() {
+    if !cmake_cmd.status()?.success() {
         eprintln!("CMake configuration failed");
-        return None;
+        return Ok(None);
     }
 
     let mut make_cmd = Command::new("make");
@@ -610,10 +611,10 @@ pub fn build_cmake(
     if !verbose {
         make_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let make_status = make_cmd.status().unwrap();
+    let make_status = make_cmd.status()?;
 
     if !make_status.success() {
-        return Some(make_status);
+        return Ok(Some(make_status));
     }
 
     let mut install_cmd = Command::new("make");
@@ -621,32 +622,32 @@ pub fn build_cmake(
     if !verbose {
         install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let install_status = install_cmd.status().unwrap();
+    let install_status = install_cmd.status()?;
 
     let bin_dir = Path::new(install_path).join("bin");
     let exe_path = bin_dir.join(repo);
 
     if exe_path.exists() {
-        Some(install_status)
+        Ok(Some(install_status))
     } else {
         match find_built_executable(&build_dir, repo, "cmake") {
             Some(built_exe) => {
-                fs::create_dir_all(&bin_dir).unwrap();
+                fs::create_dir_all(&bin_dir)?;
                 let exe_name = Path::new(&built_exe)
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or(repo);
                 let dest = bin_dir.join(exe_name);
-                fs::copy(&built_exe, &dest).unwrap();
+                fs::copy(&built_exe, &dest)?;
                 use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&dest).unwrap().permissions();
+                let mut perms = fs::metadata(&dest)?.permissions();
                 perms.set_mode(0o755);
-                fs::set_permissions(&dest, perms).unwrap();
-                Some(install_status)
+                fs::set_permissions(&dest, perms)?;
+                Ok(Some(install_status))
             }
             None => {
                 eprintln!("Could not find executable after build");
-                None
+                Ok(None)
             }
         }
     }
@@ -657,7 +658,7 @@ pub fn build_meson(
     install_path: &str,
     repo: &str,
     verbose: bool,
-) -> Option<std::process::ExitStatus> {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let build_dir = Path::new(temp).join("build");
 
     let mut setup_cmd = Command::new("meson");
@@ -670,9 +671,9 @@ pub fn build_meson(
         setup_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
 
-    if !setup_cmd.status().unwrap().success() {
+    if !setup_cmd.status()?.success() {
         eprintln!("Meson setup failed");
-        return None;
+        return Ok(None);
     }
 
     let mut compile_cmd = Command::new("meson");
@@ -680,10 +681,10 @@ pub fn build_meson(
     if !verbose {
         compile_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let compile_status = compile_cmd.status().unwrap();
+    let compile_status = compile_cmd.status()?;
 
     if !compile_status.success() {
-        return Some(compile_status);
+        return Ok(Some(compile_status));
     }
 
     println!("Installing with meson (this handles data files)...");
@@ -692,7 +693,7 @@ pub fn build_meson(
     if !verbose {
         install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let install_status = install_cmd.status().unwrap();
+    let install_status = install_cmd.status()?;
 
     let bin_dir = Path::new(install_path).join("bin");
     let exe_path = bin_dir.join(repo);
@@ -715,7 +716,7 @@ pub fn build_meson(
         }
     }
 
-    Some(install_status)
+    Ok(Some(install_status))
 }
 
 pub fn build_mason(
@@ -723,7 +724,7 @@ pub fn build_mason(
     install_path: &str,
     repo: &str,
     verbose: bool,
-) -> Option<std::process::ExitStatus> {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     build_make(temp, install_path, repo, verbose, &BuildConfig::default())
 }
 
@@ -732,19 +733,19 @@ pub fn build_ninja(
     install_path: &str,
     repo: &str,
     verbose: bool,
-) -> Option<std::process::ExitStatus> {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let mut ninja_cmd = Command::new("ninja");
     ninja_cmd.current_dir(temp);
     if !verbose {
         ninja_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let ninja_status = ninja_cmd.status().unwrap();
+    let ninja_status = ninja_cmd.status()?;
 
     if !ninja_status.success() {
-        return Some(ninja_status);
+        return Ok(Some(ninja_status));
     }
 
     match find_built_executable(Path::new(temp), repo, "ninja") {
@@ -755,25 +756,25 @@ pub fn build_ninja(
                 .and_then(|n| n.to_str())
                 .unwrap_or(repo);
             let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest).unwrap();
+            fs::copy(&exe_path, &dest)?;
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            let mut perms = fs::metadata(&dest)?.permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms).unwrap();
-            Some(ninja_status)
+            fs::set_permissions(&dest, perms)?;
+            Ok(Some(ninja_status))
         }
         None => {
             eprintln!("Could not find executable after build");
             eprintln!("Searched in: {}", temp);
             eprintln!("Try running with -v flag to see build output");
-            None
+            Ok(None)
         }
     }
 }
 
-pub fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> std::process::ExitStatus {
+pub fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let mut cmd = Command::new("go");
     cmd.arg("build")
@@ -783,22 +784,22 @@ pub fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> st
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    cmd.status().unwrap()
+    Ok(Some(cmd.status()?))
 }
 
-pub fn build_just(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+pub fn build_just(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let mut cmd = Command::new("just");
     cmd.current_dir(temp);
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let status = cmd.status().unwrap();
+    let status = cmd.status()?;
 
     if !status.success() {
-        return Some(status);
+        return Ok(Some(status));
     }
 
     match find_built_executable(Path::new(temp), repo, "just") {
@@ -811,35 +812,35 @@ pub fn build_just(temp: &str, install_path: &str, repo: &str, verbose: bool) -> 
                 .and_then(|n| n.to_str())
                 .unwrap_or(repo);
             let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest).unwrap();
+            fs::copy(&exe_path, &dest)?;
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            let mut perms = fs::metadata(&dest)?.permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms).unwrap();
-            Some(status)
+            fs::set_permissions(&dest, perms)?;
+            Ok(Some(status))
         }
         None => {
             eprintln!("Could not find executable after build");
             eprintln!("Searched in: {}", temp);
             eprintln!("Try running with -v flag to see build output");
-            None
+            Ok(None)
         }
     }
 }
 
-pub fn build_rake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Option<std::process::ExitStatus> {
+pub fn build_rake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let mut cmd = Command::new("rake");
     cmd.current_dir(temp);
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let status = cmd.status().unwrap();
+    let status = cmd.status()?;
 
     if !status.success() {
-        return Some(status);
+        return Ok(Some(status));
     }
 
     match find_built_executable(Path::new(temp), repo, "rake") {
@@ -852,18 +853,18 @@ pub fn build_rake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> 
                 .and_then(|n| n.to_str())
                 .unwrap_or(repo);
             let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest).unwrap();
+            fs::copy(&exe_path, &dest)?;
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            let mut perms = fs::metadata(&dest)?.permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms).unwrap();
-            Some(status)
+            fs::set_permissions(&dest, perms)?;
+            Ok(Some(status))
         }
         None => {
             eprintln!("Could not find executable after build");
             eprintln!("Searched in: {}", temp);
             eprintln!("Try running with -v flag to see build output");
-            None
+            Ok(None)
         }
     }
 }
@@ -874,20 +875,20 @@ pub fn build_nodejs(
     repo: &str,
     verbose: bool,
     js_pm: &str,
-) -> std::process::ExitStatus {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     use std::os::unix::fs::PermissionsExt;
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let mut install_cmd = Command::new(js_pm);
     install_cmd.arg("install").current_dir(temp);
     if !verbose {
         install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let install_status = install_cmd.status().unwrap();
+    let install_status = install_cmd.status()?;
 
     if !install_status.success() {
-        return install_status;
+        return Ok(Some(install_status));
     }
 
     let package_json_path = Path::new(temp).join("package.json");
@@ -932,12 +933,12 @@ pub fn build_nodejs(
                         if src.extension().and_then(|e| e.to_str()) == Some("js") {
                             let wrapper =
                                 format!("#!/usr/bin/env node\nrequire('{}');", src.display());
-                            fs::write(&dest, wrapper).unwrap();
-                            let mut perms = fs::metadata(&dest).unwrap().permissions();
+                            fs::write(&dest, wrapper)?;
+                            let mut perms = fs::metadata(&dest)?.permissions();
                             perms.set_mode(0o755);
-                            fs::set_permissions(&dest, perms).unwrap();
+                            fs::set_permissions(&dest, perms)?;
                         } else {
-                            fs::copy(&src, &dest).unwrap();
+                            fs::copy(&src, &dest)?;
                         }
                     }
                 }
@@ -946,7 +947,7 @@ pub fn build_nodejs(
     }
 
     println!("Note: {} package installed at {}", js_pm, install_path);
-    install_status
+    Ok(Some(install_status))
 }
 
 pub fn build_electron(
@@ -954,10 +955,10 @@ pub fn build_electron(
     install_path: &str,
     repo: &str,
     verbose: bool,
-) -> std::process::ExitStatus {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     use std::os::unix::fs::PermissionsExt;
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let js_pm = detect_js_package_manager(temp);
 
@@ -966,10 +967,10 @@ pub fn build_electron(
     if !verbose {
         install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let install_status = install_cmd.status().unwrap();
+    let install_status = install_cmd.status()?;
 
     if !install_status.success() {
-        return install_status;
+        return Ok(Some(install_status));
     }
 
     let package_json = Path::new(temp).join("package.json");
@@ -1001,10 +1002,10 @@ pub fn build_electron(
 
     let electron_dir = Path::new(install_path).join("electron");
     if electron_dir.exists() {
-        fs::remove_dir_all(&electron_dir).unwrap();
+        fs::remove_dir_all(&electron_dir)?;
     }
-    fs::create_dir_all(electron_dir.parent().unwrap()).unwrap();
-    fs::rename(temp, &electron_dir).unwrap();
+    fs::create_dir_all(electron_dir.parent().unwrap_or(Path::new(install_path)))?;
+    fs::rename(temp, &electron_dir)?;
 
     if let Some(main) = main_entry {
         let src = electron_dir.join(&main);
@@ -1013,14 +1014,14 @@ pub fn build_electron(
             "#!/bin/sh\n# Edit flags below if electron has display issues (e.g. NVIDIA on Wayland)\nexec electron {} \"$@\"\n",
             src.display()
         );
-        fs::write(&dest, wrapper).unwrap();
-        let mut perms = fs::metadata(&dest).unwrap().permissions();
+        fs::write(&dest, wrapper)?;
+        let mut perms = fs::metadata(&dest)?.permissions();
         perms.set_mode(0o755);
-        fs::set_permissions(&dest, perms).unwrap();
+        fs::set_permissions(&dest, perms)?;
     }
 
     println!("Note: electron package installed at {}", install_path);
-    install_status
+    Ok(Some(install_status))
 }
 
 pub fn build_gradle(
@@ -1028,9 +1029,9 @@ pub fn build_gradle(
     install_path: &str,
     repo: &str,
     verbose: bool,
-) -> std::process::ExitStatus {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let mut cmd = if Path::new(temp).join("gradlew").exists() {
         let mut c = Command::new("sh");
@@ -1043,7 +1044,7 @@ pub fn build_gradle(
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let status = cmd.status().unwrap();
+    let status = cmd.status()?;
 
     if status.success() {
         let build_libs = Path::new(temp).join("build/libs");
@@ -1052,25 +1053,25 @@ pub fn build_gradle(
                 let path = entry.path();
                 if path.extension().and_then(|e| e.to_str()) == Some("jar") {
                     let dest_jar = bin_dir.join(format!("{}.jar", repo));
-                    fs::copy(&path, &dest_jar).unwrap();
+                    fs::copy(&path, &dest_jar)?;
 
                     let wrapper = bin_dir.join(repo);
                     let script = format!(
                         "#!/bin/bash\nexec java -jar \"{}\" \"$@\"",
                         dest_jar.display()
                     );
-                    fs::write(&wrapper, script).unwrap();
+                    fs::write(&wrapper, script)?;
                     use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(&wrapper).unwrap().permissions();
+                    let mut perms = fs::metadata(&wrapper)?.permissions();
                     perms.set_mode(0o755);
-                    fs::set_permissions(&wrapper, perms).unwrap();
+                    fs::set_permissions(&wrapper, perms)?;
                     break;
                 }
             }
         }
     }
 
-    status
+    Ok(Some(status))
 }
 
 pub fn build_shell(
@@ -1078,9 +1079,9 @@ pub fn build_shell(
     install_path: &str,
     repo: &str,
     verbose: bool,
-) -> Option<std::process::ExitStatus> {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir).unwrap();
+    fs::create_dir_all(&bin_dir)?;
 
     let find_script = |temp: &str, repo: &str| -> Option<std::path::PathBuf> {
         let base = Path::new(temp);
@@ -1136,7 +1137,7 @@ pub fn build_shell(
         Some(s) => s,
         None => {
             eprintln!("Could not find shell script in {}", temp);
-            return None;
+            return Ok(None);
         }
     };
 
@@ -1148,15 +1149,15 @@ pub fn build_shell(
     match fs::copy(&script, &dest) {
         Ok(_) => {
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest).unwrap().permissions();
+            let mut perms = fs::metadata(&dest)?.permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms).unwrap();
+            fs::set_permissions(&dest, perms)?;
             use std::os::unix::process::ExitStatusExt;
-            Some(std::process::ExitStatus::from_raw(0))
+            Ok(Some(std::process::ExitStatus::from_raw(0)))
         }
         Err(e) => {
             eprintln!("Failed to copy script: {}", e);
-            None
+            Ok(None)
         }
     }
 }
@@ -1166,7 +1167,7 @@ pub fn build_python(
     install_path: &str,
     repo: &str,
     verbose: bool,
-) -> Option<std::process::ExitStatus> {
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     use std::os::unix::fs::PermissionsExt;
     use std::os::unix::process::ExitStatusExt;
 
@@ -1176,7 +1177,7 @@ pub fn build_python(
         "python"
     } else {
         eprintln!("Python not found on PATH; cannot build python package");
-        return None;
+        return Ok(None);
     };
 
     let temp_path = Path::new(temp);
@@ -1191,7 +1192,7 @@ pub fn build_python(
     let bin_dir = Path::new(install_path).join("bin");
     if let Err(e) = fs::create_dir_all(&bin_dir) {
         eprintln!("Failed to create bin directory {}: {}", bin_dir.display(), e);
-        return None;
+        return Ok(None);
     }
 
     let venv_dir = Path::new(install_path).join("venv");
@@ -1202,7 +1203,7 @@ pub fn build_python(
 
     if let Err(e) = fs::create_dir_all(&venv_dir) {
         eprintln!("Failed to create venv directory {}: {}", venv_dir.display(), e);
-        return None;
+        return Ok(None);
     }
 
     println!("Creating virtualenv at {}", venv_dir.display());
@@ -1211,11 +1212,11 @@ pub fn build_python(
     if !verbose {
         venv_cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    let venv_status = venv_cmd.status().ok()?;
+    let venv_status = venv_cmd.status()?;
     if !venv_status.success() {
         eprintln!("Failed to create virtualenv. On Debian/Ubuntu, try: apt install python3-venv");
         let _ = fs::remove_dir_all(&venv_dir);
-        return Some(venv_status);
+        return Ok(Some(venv_status));
     }
 
     let venv_python = venv_dir.join("bin").join("python");
@@ -1225,7 +1226,7 @@ pub fn build_python(
             venv_python.display()
         );
         let _ = fs::remove_dir_all(&venv_dir);
-        return None;
+        return Ok(None);
     }
 
     let mut pip_upgrade = Command::new(&venv_python);
@@ -1257,11 +1258,11 @@ pub fn build_python(
         if !verbose {
             req_cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
-        let req_status = req_cmd.status().ok()?;
+        let req_status = req_cmd.status()?;
         if !req_status.success() {
             eprintln!("Failed to install requirements.txt, cleaning up venv...");
             let _ = fs::remove_dir_all(&venv_dir);
-            return Some(req_status);
+            return Ok(Some(req_status));
         }
     }
 
@@ -1277,11 +1278,11 @@ pub fn build_python(
         if !verbose {
             install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
-        let status = install_cmd.status().ok()?;
+        let status = install_cmd.status()?;
         if !status.success() {
             eprintln!("pip install failed for python package, cleaning up venv...");
             let _ = fs::remove_dir_all(&venv_dir);
-            return Some(status);
+            return Ok(Some(status));
         }
         Some(status)
     } else {
@@ -1336,7 +1337,7 @@ pub fn build_python(
                     lib_dir.display(),
                     e
                 );
-                return install_status;
+                return Ok(install_status);
             }
 
             let dest_script = lib_dir.join(&script_name);
@@ -1347,7 +1348,7 @@ pub fn build_python(
                     dest_script.display(),
                     e
                 );
-                return install_status;
+                return Ok(install_status);
             }
 
             if let Ok(meta) = fs::metadata(&dest_script) {
@@ -1387,7 +1388,7 @@ pub fn build_python(
         }
     }
 
-    install_status.or(Some(std::process::ExitStatus::from_raw(0)))
+    Ok(install_status.or(Some(std::process::ExitStatus::from_raw(0))))
 }
 
 fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)> {

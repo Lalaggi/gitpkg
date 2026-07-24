@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 
+use crate::error::GitpkgError;
 use crate::package::home_dir;
 
 /// User configuration loaded from `~/.config/gitpkg/config.toml`.
@@ -20,15 +21,15 @@ pub struct Config {
 impl Config {
     /// Load the config file, falling back to defaults if it is absent or
     /// unreadable. A malformed file prints a warning but does not abort.
-    pub fn load() -> Config {
+    pub fn load() -> Result<Config, GitpkgError> {
         let path = match config_path() {
             Some(p) => p,
-            None => return Config::default(),
+            None => return Ok(Config::default()),
         };
 
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(_) => return Config::default(),
+            Err(_) => return Ok(Config::default()),
         };
 
         let value: toml::Value = match toml::from_str(&content) {
@@ -39,7 +40,7 @@ impl Config {
                     path.display(),
                     e
                 );
-                return Config::default();
+                return Ok(Config::default());
             }
         };
 
@@ -50,7 +51,7 @@ impl Config {
                 .unwrap_or(false)
         };
 
-        Config {
+        Ok(Config {
             system: get_bool("system"),
             ssh: get_bool("ssh"),
             remove_deps: get_bool("remove_deps"),
@@ -61,7 +62,7 @@ impl Config {
                 .and_then(|v| v.as_str())
                 .unwrap_or("auto")
                 .to_string(),
-        }
+        })
     }
 }
 

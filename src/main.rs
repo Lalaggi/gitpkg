@@ -4,11 +4,21 @@ mod commands;
 mod config;
 mod data;
 mod detect;
+mod error;
 mod git;
 mod package;
 mod util;
 
+use error::GitpkgError;
+
 fn main() {
+    if let Err(e) = run() {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), GitpkgError> {
     let args: Vec<String> = std::env::args().collect();
     if args.len() < 2 {
         eprintln!(
@@ -20,17 +30,14 @@ fn main() {
     // `config --init` writes a default config template and exits.
     if args.len() >= 2 && args[1] == "config" {
         if args.len() >= 3 && args[2] == "--init" {
-            if let Err(e) = config::write_default() {
-                eprintln!("Failed to write config: {}", e);
-                std::process::exit(1);
-            }
+            config::write_default()?;
         } else {
             println!("Usage: gitpkg config --init   (write a default ~/.config/gitpkg/config.toml)");
         }
-        return;
+        return Ok(());
     }
 
-    let cfg = config::Config::load();
+    let cfg = config::Config::load()?;
 
     // CLI flags override config-file defaults.
     let verbose = args.contains(&"-v".to_string()) || cfg.verbose;
@@ -128,9 +135,9 @@ fn main() {
         if pos + 1 < args.len() {
             Some(cli::resolve_supplier_shortname(&args[pos + 1]))
         } else {
-            eprintln!("Error: --supplier flag requires a domain argument");
-            eprintln!("Example: --supplier gitlab.com");
-            std::process::exit(1);
+            return Err(GitpkgError::Parse(
+                "--supplier flag requires a domain argument (e.g. --supplier gitlab.com)".into(),
+            ));
         }
     } else {
         None
@@ -140,14 +147,15 @@ fn main() {
         if pos + 1 < args.len() {
             let b = args[pos + 1].clone();
             if b.is_empty() {
-                eprintln!("Error: --branch requires a non-empty branch name");
-                std::process::exit(1);
+                return Err(GitpkgError::Parse(
+                    "--branch requires a non-empty branch name".into(),
+                ));
             }
             Some(b)
         } else {
-            eprintln!("Error: --branch flag requires a branch name argument");
-            eprintln!("Example: --branch stable");
-            std::process::exit(1);
+            return Err(GitpkgError::Parse(
+                "--branch flag requires a branch name argument (e.g. --branch stable)".into(),
+            ));
         }
     } else {
         None
@@ -157,7 +165,7 @@ fn main() {
         "install" => {
             if positional.len() < 2 {
                 eprintln!("Usage: gitpkg install <user>/<repo> [--supplier <domain>] [--branch <branch>] [--target <make-target>] [--flags \"<extra build args>\"] [--submodules]");
-                return;
+                return Ok(());
             }
             commands::install(
                 &positional[1],
@@ -168,72 +176,72 @@ fn main() {
                 submodules,
                 ssh,
                 system_wide,
-            );
+            )?;
         }
         "remove" => {
             if positional.len() < 2 {
                 eprintln!("Usage: gitpkg remove <user>/<repo>");
-                return;
+                return Ok(());
             }
             let target = cli::resolve_self_alias(&positional[1]);
-            commands::remove(&target, remove_deps);
+            commands::remove(&target, remove_deps)?;
         }
         "goto" => {
             if positional.len() < 2 {
                 eprintln!("Usage: gitpkg goto <user>/<repo> [--shell|-s]");
-                return;
+                return Ok(());
             }
             let spawn_shell =
                 args.contains(&"--shell".to_string()) || args.contains(&"-s".to_string());
             let target = cli::resolve_self_alias(&positional[1]);
-            commands::goto(&target, spawn_shell);
+            commands::goto(&target, spawn_shell)?;
         }
         "clean" => {
             if positional.len() >= 2 && &positional[1] == "all" {
-                commands::clean_all();
+                commands::clean_all()?;
             } else if positional.len() >= 2 {
                 let target = cli::resolve_self_alias(&positional[1]);
-                commands::clean(&target);
+                commands::clean(&target)?;
             } else {
-                commands::clean_all();
+                commands::clean_all()?;
             }
         }
         "versions" => {
             if positional.len() < 2 {
                 eprintln!("Usage: gitpkg versions <user>/<repo>");
-                return;
+                return Ok(());
             }
             let target = cli::resolve_self_alias(&positional[1]);
-            commands::versions(&target);
+            commands::versions(&target)?;
         }
         "version" => {
             eprintln!("Warning: 'version' is an alias for 'versions'. It is recommended to use 'versions'.");
             if positional.len() < 2 {
                 eprintln!("Usage: gitpkg version <user>/<repo>");
-                return;
+                return Ok(());
             }
             let target = cli::resolve_self_alias(&positional[1]);
-            commands::versions(&target);
+            commands::versions(&target)?;
         }
         "change-branch" => {
             if positional.len() < 3 {
                 eprintln!("Usage: gitpkg change-branch <user>/<repo> <branch-name>");
-                return;
+                return Ok(());
             }
             let target = cli::resolve_self_alias(&positional[1]);
-            commands::change_branch(&target, &positional[2], verbose, supplier.as_deref());
+            commands::change_branch(&target, &positional[2], verbose, supplier.as_deref())?;
         }
-        "list" => commands::list(),
+        "list" => commands::list()?,
         "upgrade" => {
             if positional.len() < 2 || &positional[1] == "all" {
-                commands::upgrade_all(verbose);
+                commands::upgrade_all(verbose)?;
             } else {
                 let target = if positional[1] == "self" {
                     "el1lovescomputers/gitpkg".to_string()
                 } else {
                     positional[1].clone()
                 };
-                commands::upgrade(&target, verbose, supplier.as_deref());
+                commands::upgrade(&target, verbose, supplier.as_deref())?;
             }
         }
         "help" | "-h" | "--help" => {
@@ -271,20 +279,21 @@ fn main() {
             println!("Defaults for --system, --ssh, --remove-deps, -v and --submodules");
             println!("can be set in ~/.config/gitpkg/config.toml (see `gitpkg config --init`).");
             println!("Explicit CLI flags always override the config file.");
-            return;
+            return Ok(());
         }
         "update" => {
             if positional.len() < 2 || &positional[1] == "all" {
-                commands::upgrade_all(verbose);
+                commands::upgrade_all(verbose)?;
             } else {
                 let target = if positional[1] == "self" {
                     "el1lovescomputers/gitpkg".to_string()
                 } else {
                     positional[1].clone()
                 };
-                commands::upgrade(&target, verbose, supplier.as_deref());
+                commands::upgrade(&target, verbose, supplier.as_deref())?;
             }
         }
-        _ => eprintln!("Unknown command: {}", command),
+        _ => return Err(GitpkgError::Parse(format!("Unknown command: {}", command))),
     }
+    Ok(())
 }

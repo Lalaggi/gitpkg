@@ -17,12 +17,13 @@ use crate::data::{
     refresh_desktop_database,
 };
 use crate::detect::{build_system_packages, detect_build_system};
+use crate::error::GitpkgError;
 use crate::git::{
     check_branch_exists, get_commit_hash, get_remote_commit_hash,
     run_git_clone_with_progress,
 };
 use crate::package::{
-    find_matching_packages, find_package_by_key, home_dir, install_root,
+    find_matching_packages, find_package_by_key, home_dir, home_dir_or_err, install_root,
     parse_pkg, parse_pkg_with_supplier, prompt_package_selection, read_package_list,
     remove_from_package_list, temp_path, write_info as write_info_file,
 };
@@ -37,35 +38,37 @@ pub fn install(
     submodules: bool,
     ssh: bool,
     system_wide: bool,
-) {
+) -> Result<(), GitpkgError> {
     let (user, repo) = parse_pkg(package);
     let url = build_git_url_with(&user, &repo, supplier, ssh, None);
     let supplier_domain = supplier.unwrap_or("github.com");
 
-    let path = temp_path(&user, &repo);
+    let path = temp_path(&user, &repo)?;
     if Path::new(&path).exists() {
-        fs::remove_dir_all(&path).unwrap();
+        fs::remove_dir_all(&path)?;
     }
 
     println!("Cloning {} from {} into {}", package, supplier_domain, path);
     if !run_git_clone_with_progress(&url, &path, verbose, branch, submodules) {
-        eprintln!("Git clone failed");
-        return;
+        let _ = fs::remove_dir_all(&path);
+        return Err(GitpkgError::CloneFailed);
     }
     println!("Successfully cloned {}!", package);
 
     let bs = match detect_build_system(&path) {
         Some(s) => s,
         None => {
+            let _ = fs::remove_dir_all(&path);
             println!("Could not detect build system");
-            return;
+            return Ok(());
         }
     };
     let pm = match detect_package_manager() {
         Some(p) => p,
         None => {
+            let _ = fs::remove_dir_all(&path);
             println!("No package manager detected");
-            return;
+            return Ok(());
         }
     };
 
@@ -77,8 +80,9 @@ pub fn install(
         } else {
             println!("Python not found, attempting to install via {}...", pm);
             if !install_system_package(pm, "python3") {
+                let _ = fs::remove_dir_all(&path);
                 eprintln!("Failed installing python");
-                return;
+                return Ok(());
             }
             installed_deps.push("python3".to_string());
             None
@@ -87,8 +91,9 @@ pub fn install(
         Some(match build_system_packages(bs, pm) {
             Some(c) => c,
             None => {
+                let _ = fs::remove_dir_all(&path);
                 println!("No compiler mapping for {} on {}", bs, pm);
-                return;
+                return Ok(());
             }
         })
     };
@@ -98,8 +103,9 @@ pub fn install(
         if !is_installed(check_bin) {
             println!("Installing {} for {} via {}...", comp, bs, pm);
             if !install_system_package(pm, comp) {
+                let _ = fs::remove_dir_all(&path);
                 eprintln!("Failed installing {}", comp);
-                return;
+                return Ok(());
             }
             installed_deps.push(comp.to_string());
         }
@@ -116,7 +122,8 @@ pub fn install(
         system_wide,
         &installed_deps,
         None,
-    );
+    )?;
+    Ok(())
 }
 
 pub fn build(
@@ -130,43 +137,41 @@ pub fn build(
     system_wide: bool,
     installed_deps: &[String],
     remote_url: Option<&str>,
-) -> bool {
-    let temp = temp_path(user, repo);
+) -> Result<bool, GitpkgError> {
+    let temp = temp_path(user, repo)?;
     let commit = get_commit_hash(&temp).unwrap_or_else(|| "unknown".to_string());
     let supplier_domain = supplier.unwrap_or("github.com");
-    let install_path = install_root(user, repo, &commit, supplier_domain);
+    let install_path = install_root(user, repo, &commit, supplier_domain)?;
     let pkg_key = crate::package::get_package_key(user, repo, supplier_domain);
-    fs::create_dir_all(&install_path).unwrap();
+    fs::create_dir_all(&install_path)?;
 
     let bs = match detect_build_system(&temp) {
         Some(s) => s,
         None => {
             println!("No build system detected");
-            return false;
+            return Ok(false);
         }
     };
     println!("Building {} with {}", repo, bs);
 
     let status = match bs {
-        "cargo" => Some(build_cargo(&temp, &install_path, verbose)),
-        "make" => build_make(&temp, &install_path, repo, verbose, config),
-        "cmake" => build_cmake(&temp, &install_path, repo, verbose, config),
-        "meson" => build_meson(&temp, &install_path, repo, verbose),
-        "python" => build_python(&temp, &install_path, repo, verbose),
-        "mason" => build_mason(&temp, &install_path, repo, verbose),
-        "ninja" => build_ninja(&temp, &install_path, repo, verbose),
-        "go" => Some(build_go(&temp, &install_path, repo, verbose)),
-        "npm" | "pnpm" | "yarn" => {
-            Some(build_nodejs(&temp, &install_path, repo, verbose, bs))
-        }
-        "electron" => Some(build_electron(&temp, &install_path, repo, verbose)),
-        "gradle" => Some(build_gradle(&temp, &install_path, repo, verbose)),
-        "sh" => build_shell(&temp, &install_path, repo, verbose),
-        "just" => build_just(&temp, &install_path, repo, verbose),
-        "rake" => build_rake(&temp, &install_path, repo, verbose),
+        "cargo" => build_cargo(&temp, &install_path, verbose)?,
+        "make" => build_make(&temp, &install_path, repo, verbose, config)?,
+        "cmake" => build_cmake(&temp, &install_path, repo, verbose, config)?,
+        "meson" => build_meson(&temp, &install_path, repo, verbose)?,
+        "python" => build_python(&temp, &install_path, repo, verbose)?,
+        "mason" => build_mason(&temp, &install_path, repo, verbose)?,
+        "ninja" => build_ninja(&temp, &install_path, repo, verbose)?,
+        "go" => build_go(&temp, &install_path, repo, verbose)?,
+        "npm" | "pnpm" | "yarn" => build_nodejs(&temp, &install_path, repo, verbose, bs)?,
+        "electron" => build_electron(&temp, &install_path, repo, verbose)?,
+        "gradle" => build_gradle(&temp, &install_path, repo, verbose)?,
+        "sh" => build_shell(&temp, &install_path, repo, verbose)?,
+        "just" => build_just(&temp, &install_path, repo, verbose)?,
+        "rake" => build_rake(&temp, &install_path, repo, verbose)?,
         _ => {
             println!("Unsupported build system: {}", bs);
-            return false;
+            return Ok(false);
         }
     };
 
@@ -174,7 +179,7 @@ pub fn build(
         Some(s) => s,
         None => {
             println!("Build failed for {}", repo);
-            return false;
+            return Ok(false);
         }
     };
 
@@ -260,7 +265,7 @@ pub fn build(
         let (symlink_created, symlink_path) = match symlink_dir {
             Some(dir) => {
                 let is_system = dir.starts_with("/usr");
-                fs::create_dir_all(&dir).unwrap();
+                fs::create_dir_all(&dir)?;
                 let target = dir.join(&exe_name);
 
                 // Refuse to clobber an existing non-symlink.
@@ -336,11 +341,11 @@ exec {} "$@"
                 exe_path.display()
             );
 
-            fs::write(&wp, wrapper_content).unwrap();
+            fs::write(&wp, wrapper_content)?;
             use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&wp).unwrap().permissions();
+            let mut perms = fs::metadata(&wp)?.permissions();
             perms.set_mode(0o755);
-            fs::set_permissions(&wp, perms).unwrap();
+            fs::set_permissions(&wp, perms)?;
             Some(wp)
         } else {
             None
@@ -392,20 +397,24 @@ exec {} "$@"
                 let desktop_file_dst = home
                     .join(".local/share/applications")
                     .join(format!("gitpkg.{}.{}.desktop", user, repo));
-                fs::create_dir_all(desktop_file_dst.parent().unwrap()).unwrap();
-                let content = fs::read_to_string(&desktop_file_src).unwrap();
+                fs::create_dir_all(
+                    desktop_file_dst
+                        .parent()
+                        .ok_or_else(|| GitpkgError::Parse("Invalid desktop file path".into()))?,
+                )?;
+                let content = fs::read_to_string(&desktop_file_src)?;
                 let new_content = content
                     .lines()
                     .map(|l| {
                         if l.starts_with("Exec=") {
-                            format!("Exec={}", final_exe_path.to_str().unwrap())
+                            format!("Exec={}", final_exe_path.to_str().unwrap_or(""))
                         } else {
                             l.to_string()
                         }
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                fs::write(&desktop_file_dst, new_content).unwrap();
+                fs::write(&desktop_file_dst, new_content)?;
                 desktop_path = Some(desktop_file_dst.to_string_lossy().into_owned());
             }
         }
@@ -437,34 +446,32 @@ exec {} "$@"
             system_wide,
             installed_deps,
             stored_remote.as_deref(),
-        );
+        )?;
 
         refresh_desktop_database();
 
         println!("Metadata written to info.gitpkg");
-        return true;
+        Ok(true)
     } else {
         println!("Build failed for {}", repo);
-        return false;
+        Ok(false)
     }
 }
 
-pub fn remove(package: &str, remove_deps: bool) {
+pub fn remove(package: &str, remove_deps: bool) -> Result<(), GitpkgError> {
     let (user, repo) = parse_pkg(package);
 
     let matches = find_matching_packages(&user, &repo);
 
     if matches.is_empty() {
-        eprintln!("Package {}/{} is not installed", user, repo);
-        return;
+        return Err(GitpkgError::PackageNotFound(format!("{}/{}", user, repo)));
     }
 
     let (pkg_key, supplier, info_path) = if matches.len() > 1 {
         match prompt_package_selection(&matches) {
             Some(idx) => matches[idx].clone(),
             None => {
-                eprintln!("Invalid selection");
-                return;
+                return Err(GitpkgError::Cancelled);
             }
         }
     } else {
@@ -473,21 +480,13 @@ pub fn remove(package: &str, remove_deps: bool) {
 
     println!("Removing {} from {}...", pkg_key, supplier);
 
-    let info_content = match fs::read_to_string(&info_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to read info file: {}", e);
-            return;
-        }
-    };
+    let info_content = fs::read_to_string(&info_path).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to read info file: {}", e))
+    })?;
 
-    let info: toml::Value = match toml::from_str(&info_content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to parse info file: {}", e);
-            return;
-        }
-    };
+    let info: toml::Value = toml::from_str(&info_content).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to parse info file: {}", e))
+    })?;
 
     if let Some(symlink_path) = info.get("symlink_path").and_then(|v| v.as_str()) {
         if Path::new(symlink_path).exists() {
@@ -577,17 +576,11 @@ pub fn remove(package: &str, remove_deps: bool) {
         }
     }
 
-    let package_dir = match home_dir() {
-        Some(h) => h
-            .join(".local/share/gitpkg")
-            .join(&pkg_key)
-            .to_string_lossy()
-            .into_owned(),
-        None => {
-            eprintln!("Error: HOME not set; cannot remove installation directory.");
-            return;
-        }
-    };
+    let package_dir = home_dir_or_err()?
+        .join(".local/share/gitpkg")
+        .join(&pkg_key)
+        .to_string_lossy()
+        .into_owned();
 
     if Path::new(&package_dir).exists() {
         match fs::remove_dir_all(&package_dir) {
@@ -599,17 +592,18 @@ pub fn remove(package: &str, remove_deps: bool) {
         }
     }
 
-    let temp = temp_path(&user, &repo);
+    let temp = temp_path(&user, &repo)?;
     if Path::new(&temp).exists() {
         let _ = fs::remove_dir_all(&temp);
     }
 
-    remove_from_package_list(&pkg_key);
+    remove_from_package_list(&pkg_key)?;
 
     println!("Successfully removed {}", pkg_key);
+    Ok(())
 }
 
-pub fn goto(package: &str, spawn_shell: bool) {
+pub fn goto(package: &str, spawn_shell: bool) -> Result<(), GitpkgError> {
     let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
 
     let exact_match = find_package_by_key(package);
@@ -619,8 +613,7 @@ pub fn goto(package: &str, spawn_shell: bool) {
     } else {
         let matches = find_matching_packages(&user, &repo);
         if matches.is_empty() {
-            eprintln!("Package {} is not installed", package);
-            return;
+            return Err(GitpkgError::PackageNotFound(package.to_string()));
         }
 
         let selected = if let Some(ref sup) = supplier_hint {
@@ -629,8 +622,7 @@ pub fn goto(package: &str, spawn_shell: bool) {
             match prompt_package_selection(&matches) {
                 Some(idx) => idx,
                 None => {
-                    eprintln!("Invalid selection");
-                    return;
+                    return Err(GitpkgError::Cancelled);
                 }
             }
         } else {
@@ -640,43 +632,38 @@ pub fn goto(package: &str, spawn_shell: bool) {
         matches[selected].clone()
     };
 
-    let info_content = match fs::read_to_string(&info_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to read info file: {}", e);
-            return;
-        }
-    };
+    let info_content = fs::read_to_string(&info_path).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to read info file: {}", e))
+    })?;
 
-    let info: toml::Value = match toml::from_str(&info_content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to parse info file: {}", e);
-            return;
-        }
-    };
+    let info: toml::Value = toml::from_str(&info_content).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to parse info file: {}", e))
+    })?;
 
     let install_path = match info.get("install_path").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => {
-            eprintln!("No install_path found for {}", pkg_key);
-            return;
+            return Err(GitpkgError::Parse(format!(
+                "No install_path found for {}",
+                pkg_key
+            )));
         }
     };
 
     if spawn_shell {
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
         println!("Spawning shell {} at {}", shell, install_path);
-        let status = Command::new(shell).current_dir(install_path).status();
-        if let Err(e) = status {
-            eprintln!("Failed to spawn shell: {}", e);
+        let status = Command::new(shell).current_dir(install_path).status()?;
+        if !status.success() {
+            eprintln!("Shell exited with non-zero status");
         }
     } else {
         println!("{}", install_path);
     }
+    Ok(())
 }
 
-pub fn clean(package: &str) {
+pub fn clean(package: &str) -> Result<(), GitpkgError> {
     let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
 
     let exact_match = find_package_by_key(package);
@@ -688,7 +675,7 @@ pub fn clean(package: &str) {
 
         if matches.is_empty() {
             println!("Package {} is not installed, nothing to clean", package);
-            return;
+            return Ok(());
         }
 
         let selected = if let Some(ref sup) = supplier_hint {
@@ -697,8 +684,7 @@ pub fn clean(package: &str) {
             match prompt_package_selection(&matches) {
                 Some(idx) => idx,
                 None => {
-                    eprintln!("Invalid selection");
-                    return;
+                    return Err(GitpkgError::Cancelled);
                 }
             }
         } else {
@@ -713,7 +699,7 @@ pub fn clean(package: &str) {
         pkg_key, supplier
     );
 
-    let temp = temp_path(&user, &repo);
+    let temp = temp_path(&user, &repo)?;
     if Path::new(&temp).exists() {
         match fs::remove_dir_all(&temp) {
             Ok(_) => println!("Removed temp directory: {}", temp),
@@ -735,23 +721,17 @@ pub fn clean(package: &str) {
 
     if current_commit.is_none() {
         println!("Could not read current version, skipping old version cleanup");
-        return;
+        return Ok(());
     }
 
     let current_commit = current_commit.unwrap();
     println!("Current version: {}", current_commit);
 
-    let package_dir = match home_dir() {
-        Some(h) => h
-            .join(".local/share/gitpkg")
-            .join(pkg_key)
-            .to_string_lossy()
-            .into_owned(),
-        None => {
-            eprintln!("Error: HOME not set; cannot clean old versions.");
-            return;
-        }
-    };
+    let package_dir = home_dir_or_err()?
+        .join(".local/share/gitpkg")
+        .join(pkg_key)
+        .to_string_lossy()
+        .into_owned();
 
     if let Ok(entries) = fs::read_dir(&package_dir) {
         let mut removed_count = 0;
@@ -785,18 +765,16 @@ pub fn clean(package: &str) {
             println!("No old versions to clean");
         }
     }
+    Ok(())
 }
 
-pub fn clean_all() {
+pub fn clean_all() -> Result<(), GitpkgError> {
     println!("Cleaning all temp files and old versions...");
 
-    let gitpkg_dir = match home_dir() {
-        Some(h) => h.join(".local/share/gitpkg").to_string_lossy().into_owned(),
-        None => {
-            eprintln!("Error: HOME not set; cannot clean.");
-            return;
-        }
-    };
+    let gitpkg_dir = home_dir_or_err()?
+        .join(".local/share/gitpkg")
+        .to_string_lossy()
+        .into_owned();
 
     let temp_dir = Path::new(&gitpkg_dir).join("temp");
     if temp_dir.exists() {
@@ -813,7 +791,7 @@ pub fn clean_all() {
 
     if packages.is_empty() {
         println!("No packages installed");
-        return;
+        return Ok(());
     }
 
     println!("Cleaning old versions for {} package(s)...", packages.len());
@@ -821,18 +799,19 @@ pub fn clean_all() {
     keys.sort();
     for package in keys {
         println!("\n--- Cleaning {} ---", package);
-        clean(&package);
+        clean(&package)?;
     }
 
     println!("\nCleanup complete!");
+    Ok(())
 }
 
-pub fn list() {
+pub fn list() -> Result<(), GitpkgError> {
     let packages = read_package_list();
 
     if packages.is_empty() {
         println!("No packages installed");
-        return;
+        return Ok(());
     }
 
     println!("Installed packages:");
@@ -907,9 +886,10 @@ pub fn list() {
 
     println!("{:-<60}", "");
     println!("Total: {} package(s)", packages.len());
+    Ok(())
 }
 
-pub fn versions(package: &str) {
+pub fn versions(package: &str) -> Result<(), GitpkgError> {
     let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
 
     let exact_match = find_package_by_key(package);
@@ -920,7 +900,7 @@ pub fn versions(package: &str) {
         let matches = find_matching_packages(&user, &repo);
         if matches.is_empty() {
             println!("Package {} is not installed", package);
-            return;
+            return Ok(());
         }
         let selected = if let Some(ref sup) = supplier_hint {
             matches.iter().position(|(_, s, _)| s == sup).unwrap_or(0)
@@ -928,8 +908,7 @@ pub fn versions(package: &str) {
             match prompt_package_selection(&matches) {
                 Some(idx) => idx,
                 None => {
-                    eprintln!("Invalid selection");
-                    return;
+                    return Err(GitpkgError::Cancelled);
                 }
             }
         } else {
@@ -950,15 +929,9 @@ pub fn versions(package: &str) {
         None
     };
 
-    let package_dir = match home_dir() {
-        Some(h) => h
-            .join(".local/share/gitpkg")
-            .join(&pkg_key),
-        None => {
-            eprintln!("Error: HOME not set; cannot list versions.");
-            return;
-        }
-    };
+    let package_dir = home_dir_or_err()?
+        .join(".local/share/gitpkg")
+        .join(&pkg_key);
 
     println!("Versions for {} (supplier: {})", pkg_key, supplier);
 
@@ -985,7 +958,7 @@ pub fn versions(package: &str) {
 
         if rows.is_empty() {
             println!("  (No versions found)");
-            return;
+            return Ok(());
         }
 
         rows.sort_by(|a, b| match (&a.3, &b.3) {
@@ -1013,9 +986,10 @@ pub fn versions(package: &str) {
     } else {
         println!("No versions found for {}", pkg_key);
     }
+    Ok(())
 }
 
-pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
+pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(), GitpkgError> {
     let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/')
     {
         match find_package_by_key(package) {
@@ -1024,11 +998,7 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
                 (u, r, sup, path)
             }
             None => {
-                eprintln!(
-                    "Package {} is not installed. Use 'install' instead.",
-                    package
-                );
-                return;
+                return Err(GitpkgError::PackageNotFound(package.to_string()));
             }
         }
     } else {
@@ -1037,19 +1007,14 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         let matches = find_matching_packages(&user, &repo);
 
         if matches.is_empty() {
-            eprintln!(
-                "Package {}/{} is not installed. Use 'install' instead.",
-                user, repo
-            );
-            return;
+            return Err(GitpkgError::PackageNotFound(format!("{}/{}", user, repo)));
         }
 
         let (_pkg_key, stored_supplier, info_path) = if matches.len() > 1 && supplier.is_none() {
             match prompt_package_selection(&matches) {
                 Some(idx) => matches[idx].clone(),
                 None => {
-                    eprintln!("Invalid selection");
-                    return;
+                    return Err(GitpkgError::Cancelled);
                 }
             }
         } else if matches.len() > 1 && supplier.is_some() {
@@ -1057,11 +1022,10 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
             match matches.iter().find(|(_, s, _)| s == supplier_str) {
                 Some(m) => m.clone(),
                 None => {
-                    eprintln!(
-                        "Package {}/{} from {} is not installed",
+                    return Err(GitpkgError::PackageNotFound(format!(
+                        "{}/{} from {}",
                         user, repo, supplier_str
-                    );
-                    return;
+                    )));
                 }
             }
         } else {
@@ -1071,27 +1035,20 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         (user, repo, stored_supplier, info_path)
     };
 
-    let info_content = match fs::read_to_string(&info_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to read info file: {}", e);
-            return;
-        }
-    };
+    let info_content = fs::read_to_string(&info_path).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to read info file: {}", e))
+    })?;
 
-    let info: toml::Value = match toml::from_str(&info_content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Failed to parse info file: {}", e);
-            return;
-        }
-    };
+    let info: toml::Value = toml::from_str(&info_content).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to parse info file: {}", e))
+    })?;
 
     let current_commit = match info.get("latest_commit").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => {
-            eprintln!("No commit hash found in info file");
-            return;
+            return Err(GitpkgError::Parse(
+                "No commit hash found in info file".into(),
+            ));
         }
     };
 
@@ -1131,8 +1088,9 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
     let latest_commit = match get_remote_commit_hash(&url, stored_branch.as_deref()) {
         Some(c) => c,
         None => {
-            eprintln!("Failed to get latest commit hash from remote");
-            return;
+            return Err(GitpkgError::Git(
+                "Failed to get latest commit hash from remote".into(),
+            ));
         }
     };
 
@@ -1143,14 +1101,14 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
             "{} is already up to date!",
             crate::package::get_package_key(&user, &repo, &stored_supplier)
         );
-        return;
+        return Ok(());
     }
 
     println!("Update available! Cloning and building new version...");
 
-    let path = temp_path(&user, &repo);
+    let path = temp_path(&user, &repo)?;
     if Path::new(&path).exists() {
-        fs::remove_dir_all(&path).unwrap();
+        fs::remove_dir_all(&path)?;
     }
 
     if !run_git_clone_with_progress(
@@ -1160,8 +1118,7 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         stored_branch.as_deref(),
         build_config.submodules,
     ) {
-        eprintln!("Git clone failed");
-        return;
+        return Err(GitpkgError::CloneFailed);
     }
 
     let stored_deps: Vec<String> = info
@@ -1185,30 +1142,31 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) {
         stored_system_wide,
         &stored_deps,
         stored_remote.as_deref(),
-    );
+    )?;
 
     if !built {
-        eprintln!(
-            "Failed to upgrade {} (build failed)",
-            crate::package::get_package_key(&user, &repo, &stored_supplier)
-        );
-        return;
+        return Err(GitpkgError::BuildFailed(crate::package::get_package_key(
+            &user,
+            &repo,
+            &stored_supplier,
+        )));
     }
 
     println!(
         "Successfully upgraded {} from {} to {}",
         crate::package::get_package_key(&user, &repo, &stored_supplier),
-        &current_commit[..8],
-        &latest_commit[..8]
+        &current_commit[..8.min(current_commit.len())],
+        &latest_commit[..8.min(latest_commit.len())]
     );
+    Ok(())
 }
 
-pub fn upgrade_all(verbose: bool) {
+pub fn upgrade_all(verbose: bool) -> Result<(), GitpkgError> {
     let packages = read_package_list();
 
     if packages.is_empty() {
         println!("No packages installed");
-        return;
+        return Ok(());
     }
 
     println!("Found {} installed package(s)", packages.len());
@@ -1217,37 +1175,41 @@ pub fn upgrade_all(verbose: bool) {
     keys.sort();
     for package in keys {
         println!("\n--- Upgrading {} ---", package);
-        upgrade(&package, verbose, None);
+        upgrade(&package, verbose, None)?;
     }
 
     println!("\nAll packages checked for updates!");
+    Ok(())
 }
 
-pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplier: Option<&str>) {
-    let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/') {
+pub fn change_branch(
+    package: &str,
+    new_branch: &str,
+    verbose: bool,
+    cli_supplier: Option<&str>,
+) -> Result<(), GitpkgError> {
+    let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/')
+    {
         match find_package_by_key(package) {
             Some((_pkg_key, sup, path)) => {
                 let (u, r) = parse_pkg(package);
                 (u, r, sup, path)
             }
             None => {
-                eprintln!("Package {} is not installed.", package);
-                return;
+                return Err(GitpkgError::PackageNotFound(package.to_string()));
             }
         }
     } else {
         let (u, r) = parse_pkg(package);
         let matches = find_matching_packages(&u, &r);
         if matches.is_empty() {
-            eprintln!("Package {} is not installed.", package);
-            return;
+            return Err(GitpkgError::PackageNotFound(package.to_string()));
         }
         let (_pkg_key, sup, path) = if matches.len() > 1 && cli_supplier.is_none() {
             match prompt_package_selection(&matches) {
                 Some(idx) => matches[idx].clone(),
                 None => {
-                    eprintln!("Invalid selection");
-                    return;
+                    return Err(GitpkgError::Cancelled);
                 }
             }
         } else if matches.len() > 1 && cli_supplier.is_some() {
@@ -1255,8 +1217,10 @@ pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplie
             match matches.iter().find(|(_, s, _)| s == sup_str) {
                 Some(m) => m.clone(),
                 None => {
-                    eprintln!("Package {}/{} from {} is not installed", u, r, sup_str);
-                    return;
+                    return Err(GitpkgError::PackageNotFound(format!(
+                        "{}/{} from {}",
+                        u, r, sup_str
+                    )));
                 }
             }
         } else {
@@ -1282,8 +1246,10 @@ pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplie
     );
     println!("Checking if '{}' exists on remote...", new_branch);
     if !check_branch_exists(&url, new_branch, verbose) {
-        eprintln!("Branch or tag '{}' does not exist on remote.", new_branch);
-        return;
+        return Err(GitpkgError::Git(format!(
+            "Branch or tag '{}' does not exist on remote",
+            new_branch
+        )));
     }
     println!("Ref '{}' exists!", new_branch);
 
@@ -1347,14 +1313,13 @@ pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplie
         }
     }
 
-    let path = temp_path(&user, &repo);
+    let path = temp_path(&user, &repo)?;
     if Path::new(&path).exists() {
-        fs::remove_dir_all(&path).unwrap();
+        fs::remove_dir_all(&path)?;
     }
     println!("Cloning '{}'...", new_branch);
     if !run_git_clone_with_progress(&url, &path, verbose, Some(new_branch), build_config.submodules) {
-        eprintln!("Git clone failed");
-        return;
+        return Err(GitpkgError::CloneFailed);
     }
 
     let built = build(
@@ -1368,12 +1333,15 @@ pub fn change_branch(package: &str, new_branch: &str, verbose: bool, cli_supplie
         stored_system_wide,
         &stored_deps,
         stored_remote.as_deref(),
-    );
+    )?;
 
     if !built {
-        eprintln!("Failed to switch {} to branch '{}' (build failed)", pkg_key, new_branch);
-        return;
+        return Err(GitpkgError::BuildFailed(format!(
+            "{} (branch '{}')",
+            pkg_key, new_branch
+        )));
     }
 
     println!("Successfully switched {} to branch '{}'", pkg_key, new_branch);
+    Ok(())
 }

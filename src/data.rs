@@ -36,7 +36,10 @@ pub fn install_data_files(
 
             if filename.ends_with(".gresource") {
                 let dest_dir = install_path.join("share").join(repo);
-                fs::create_dir_all(&dest_dir).unwrap();
+                if let Err(e) = fs::create_dir_all(&dest_dir) {
+                    eprintln!("Failed to create resource dir {}: {}", dest_dir.display(), e);
+                    continue;
+                }
                 let dest = dest_dir.join(filename);
                 match fs::copy(&path, &dest) {
                     Ok(_) => {
@@ -49,7 +52,10 @@ pub fn install_data_files(
 
             if filename.ends_with(".gschema.xml") {
                 let dest_dir = install_path.join("share/glib-2.0/schemas");
-                fs::create_dir_all(&dest_dir).unwrap();
+                if let Err(e) = fs::create_dir_all(&dest_dir) {
+                    eprintln!("Failed to create schema dir {}: {}", dest_dir.display(), e);
+                    continue;
+                }
                 let dest = dest_dir.join(filename);
                 match fs::copy(&path, &dest) {
                     Ok(_) => {
@@ -62,7 +68,10 @@ pub fn install_data_files(
 
             if filename.ends_with(".desktop") {
                 let dest_dir = install_path.join("share/applications");
-                fs::create_dir_all(&dest_dir).unwrap();
+                if let Err(e) = fs::create_dir_all(&dest_dir) {
+                    eprintln!("Failed to create desktop dir {}: {}", dest_dir.display(), e);
+                    continue;
+                }
                 let dest = dest_dir.join(filename);
                 match fs::copy(&path, &dest) {
                     Ok(_) => {
@@ -95,7 +104,10 @@ pub fn install_data_files(
 
             if filename.ends_with(".gresource") {
                 let dest_dir = install_path.join("share").join(repo);
-                fs::create_dir_all(&dest_dir).unwrap();
+                if let Err(e) = fs::create_dir_all(&dest_dir) {
+                    eprintln!("Failed to create built resource dir {}: {}", dest_dir.display(), e);
+                    continue;
+                }
                 let dest = dest_dir.join(filename);
                 if let Ok(_) = fs::copy(&path, &dest) {
                     println!("Installed built resource: {}", dest.display());

@@ -4,12 +4,18 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use crate::error::GitpkgError;
+
 /// Resolve the user's home directory without panicking.
 /// Returns `None` (instead of crashing) when HOME is unset, so callers can
 /// report a clear error rather than a cryptic `.unwrap()` panic under e.g.
 /// `sudo -E` with HOME stripped.
 pub fn home_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(PathBuf::from)
+}
+
+pub fn home_dir_or_err() -> Result<PathBuf, GitpkgError> {
+    home_dir().ok_or(GitpkgError::HomeNotFound)
 }
 
 pub fn parse_pkg(arg: &str) -> (String, String) {
@@ -65,18 +71,16 @@ pub fn get_package_key(user: &str, repo: &str, supplier: &str) -> String {
     }
 }
 
-pub fn list_file_path() -> String {
-    match home_dir() {
-        Some(h) => h.join(".local/share/gitpkg/list.gitpkg").to_string_lossy().into_owned(),
-        None => {
-            eprintln!("Error: HOME environment variable is not set; cannot locate gitpkg state.");
-            std::process::exit(1);
-        }
-    }
+pub fn list_file_path() -> Result<String, GitpkgError> {
+    let h = home_dir_or_err()?;
+    Ok(h.join(".local/share/gitpkg/list.gitpkg").to_string_lossy().into_owned())
 }
 
 pub fn read_package_list() -> HashMap<String, String> {
-    let list_path = list_file_path();
+    let list_path = match list_file_path() {
+        Ok(p) => p,
+        Err(_) => return HashMap::new(),
+    };
     let mut packages = HashMap::new();
 
     if let Ok(content) = fs::read_to_string(&list_path) {
@@ -91,11 +95,11 @@ pub fn read_package_list() -> HashMap<String, String> {
     packages
 }
 
-pub fn write_package_list(packages: &HashMap<String, String>) {
-    let list_path = list_file_path();
+pub fn write_package_list(packages: &HashMap<String, String>) -> Result<(), GitpkgError> {
+    let list_path = list_file_path()?;
 
     if let Some(parent) = Path::new(&list_path).parent() {
-        fs::create_dir_all(parent).unwrap();
+        fs::create_dir_all(parent)?;
     }
 
     let mut content = String::new();
@@ -106,20 +110,26 @@ pub fn write_package_list(packages: &HashMap<String, String>) {
         content.push_str(&format!("{} = {}\n", pkg, path));
     }
 
-    fs::write(&list_path, content).unwrap();
+    fs::write(&list_path, content)?;
+    Ok(())
 }
 
-pub fn add_to_package_list(user: &str, repo: &str, info_path: &str, supplier: &str) {
+pub fn add_to_package_list(
+    user: &str,
+    repo: &str,
+    info_path: &str,
+    supplier: &str,
+) -> Result<(), GitpkgError> {
     let mut packages = read_package_list();
     let key = get_package_key(user, repo, supplier);
     packages.insert(key, info_path.to_string());
-    write_package_list(&packages);
+    write_package_list(&packages)
 }
 
-pub fn remove_from_package_list(package_key: &str) {
+pub fn remove_from_package_list(package_key: &str) -> Result<(), GitpkgError> {
     let mut packages = read_package_list();
     packages.remove(package_key);
-    write_package_list(&packages);
+    write_package_list(&packages)
 }
 
 pub fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, String)> {
@@ -189,7 +199,7 @@ pub fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<
     }
 
     print!("Select package (1-{}): ", matches.len());
-    io::stdout().flush().unwrap();
+    io::stdout().flush().ok()?;
 
     let mut input = String::new();
     io::stdin().read_line(&mut input).ok()?;
@@ -203,35 +213,28 @@ pub fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<
     None
 }
 
-pub fn temp_path(user: &str, repo: &str) -> String {
+pub fn temp_path(user: &str, repo: &str) -> Result<String, GitpkgError> {
     let hash = format!("{:x}", md5::compute(format!("{}{}", user, repo)));
-    match home_dir() {
-        Some(h) => h
-            .join(".local/share/gitpkg/temp")
-            .join(hash)
-            .to_string_lossy()
-            .into_owned(),
-        None => {
-            eprintln!("Error: HOME environment variable is not set; cannot create temp dir.");
-            std::process::exit(1);
-        }
-    }
+    let h = home_dir_or_err()?;
+    Ok(h.join(".local/share/gitpkg/temp")
+        .join(hash)
+        .to_string_lossy()
+        .into_owned())
 }
 
-pub fn install_root(user: &str, repo: &str, commit: &str, supplier: &str) -> String {
+pub fn install_root(
+    user: &str,
+    repo: &str,
+    commit: &str,
+    supplier: &str,
+) -> Result<String, GitpkgError> {
     let pkg_key = get_package_key(user, repo, supplier);
-    match home_dir() {
-        Some(h) => h
-            .join(".local/share/gitpkg")
-            .join(pkg_key)
-            .join(commit)
-            .to_string_lossy()
-            .into_owned(),
-        None => {
-            eprintln!("Error: HOME environment variable is not set; cannot determine install root.");
-            std::process::exit(1);
-        }
-    }
+    let h = home_dir_or_err()?;
+    Ok(h.join(".local/share/gitpkg")
+        .join(pkg_key)
+        .join(commit)
+        .to_string_lossy()
+        .into_owned())
 }
 
 pub fn write_info(
@@ -254,22 +257,16 @@ pub fn write_info(
     system_wide: bool,
     installed_deps: &[String],
     remote_url: Option<&str>,
-) {
+) -> Result<(), GitpkgError> {
     use chrono::Utc;
 
     let pkg_key = get_package_key(user, repo, supplier);
-    let info_dir = match home_dir() {
-        Some(h) => h
-            .join(".local/share/gitpkg")
-            .join(pkg_key)
-            .to_string_lossy()
-            .into_owned(),
-        None => {
-            eprintln!("Error: HOME environment variable is not set; cannot write info file.");
-            std::process::exit(1);
-        }
-    };
-    fs::create_dir_all(&info_dir).unwrap();
+    let info_dir = home_dir_or_err()?
+        .join(".local/share/gitpkg")
+        .join(pkg_key)
+        .to_string_lossy()
+        .into_owned();
+    fs::create_dir_all(&info_dir)?;
     let info_file = Path::new(&info_dir).join("info.gitpkg");
 
     let mut toml_data = format!(
@@ -323,7 +320,10 @@ pub fn write_info(
     }
 
     if let Some(f) = build_flags {
-        toml_data.push_str(&format!("build_flags = \"{}\"\n", f.replace('\\', "\\\\").replace('"', "\\\"")));
+        toml_data.push_str(&format!(
+            "build_flags = \"{}\"\n",
+            f.replace('\\', "\\\\").replace('"', "\\\"")
+        ));
     }
 
     if submodules {
@@ -350,7 +350,7 @@ pub fn write_info(
         toml_data.push_str(&format!("desktop_file = \"{}\"\n", dp));
     }
 
-    fs::write(&info_file, toml_data).unwrap();
+    fs::write(&info_file, toml_data)?;
 
-    add_to_package_list(user, repo, info_file.to_str().unwrap(), supplier);
+    add_to_package_list(user, repo, info_file.to_str().unwrap_or(""), supplier)
 }
