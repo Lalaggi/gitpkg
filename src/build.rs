@@ -3,46 +3,34 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+use serde::Deserialize;
+
 use crate::cli::is_installed;
 use crate::detect::{detect_js_package_manager, is_python_file};
 use crate::error::GitpkgError;
+use crate::package::PackageInfo;
 use crate::util::pascal_to_kebab_case;
 
 /// Per-package build customization. `make_target` overrides the default make
 /// goal (e.g. `build-i686`); `build_flags` are extra args appended to the
 /// underlying build command (make or cmake).
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Deserialize)]
 pub struct BuildConfig {
     pub make_target: Option<String>,
     pub build_flags: Option<String>,
+    #[serde(default)]
     pub submodules: bool,
     /// JAVA_HOME used for gradle builds, if the default JDK is unsuitable.
     pub java_home: Option<String>,
 }
 
 impl BuildConfig {
-    pub fn from_info(info: &toml::Value) -> BuildConfig {
-        let make_target = info
-            .get("make_target")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let build_flags = info
-            .get("build_flags")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let submodules = info
-            .get("submodules")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let java_home = info
-            .get("java_home")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
+    pub fn from_info(info: &PackageInfo) -> BuildConfig {
         BuildConfig {
-            make_target,
-            build_flags,
-            submodules,
-            java_home,
+            make_target: info.make_target.clone(),
+            build_flags: info.build_flags.clone(),
+            submodules: info.submodules,
+            java_home: None,
         }
     }
 
@@ -292,16 +280,6 @@ pub fn find_built_executable(
     build_dir: &Path,
     repo: &str,
     build_system: &str,
-) -> Option<String> {
-    find_built_executable_with_dirs(build_dir, repo, build_system, &[])
-}
-
-/// Like `find_built_executable`, but also searches the given extra directories
-/// first. Used when a custom make target builds into a subdirectory.
-pub fn find_built_executable_with_dirs(
-    build_dir: &Path,
-    repo: &str,
-    build_system: &str,
     extra_dirs: &[PathBuf],
 ) -> Option<String> {
     let mut search_names = Vec::new();
@@ -408,6 +386,54 @@ pub fn find_built_executable_with_dirs(
     }
 
     prompt_executable_selection(&all_executables)
+}
+
+/// Convenience wrapper that searches with no extra directories.
+pub fn find_built_executable_simple(
+    build_dir: &Path,
+    repo: &str,
+    build_system: &str,
+) -> Option<String> {
+    find_built_executable(build_dir, repo, build_system, &[])
+}
+
+/// Run a build command, find the resulting executable, and install it to bin_dir.
+/// Shared by build_ninja, build_just, build_rake, and similar simple builders.
+fn build_and_install_binary(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+    cmd_name: &str,
+    cmd_args: &[&str],
+    build_system: &str,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir)?;
+
+    let mut cmd = Command::new(cmd_name);
+    cmd.current_dir(temp);
+    for arg in cmd_args {
+        cmd.arg(arg);
+    }
+    if !verbose {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let status = cmd.status()?;
+
+    if !status.success() {
+        return Ok(Some(status));
+    }
+
+    if let Some(exe_path) = find_built_executable_simple(Path::new(temp), repo, build_system) {
+        copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
+        Ok(Some(status))
+    } else {
+        eprintln!("Could not find executable after build");
+        eprintln!("Searched in: {}", temp);
+        eprintln!("Try running with -v flag to see build output");
+        Ok(None)
+    }
 }
 
 /// Copy a found executable into `bin_dir`, set executable permissions, and
@@ -606,7 +632,7 @@ pub fn build_make(
         }
     }
 
-    if let Some(exe_path) = find_built_executable_with_dirs(Path::new(temp), repo, "make", &extra_dirs) {
+    if let Some(exe_path) = find_built_executable(Path::new(temp), repo, "make", &extra_dirs) {
         copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
         Ok(Some(make_status))
     } else {
@@ -670,7 +696,7 @@ pub fn build_cmake(
 
     if exe_path.exists() {
         Ok(Some(install_status))
-    } else if let Some(built_exe) = find_built_executable(&build_dir, repo, "cmake") {
+    } else if let Some(built_exe) = find_built_executable_simple(&build_dir, repo, "cmake") {
         copy_executable_to_bin_dir(&built_exe, repo, &bin_dir, verbose)?;
         Ok(Some(install_status))
     } else {
@@ -762,29 +788,7 @@ pub fn build_ninja(
     repo: &str,
     verbose: bool,
 ) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir)?;
-
-    let mut ninja_cmd = Command::new("ninja");
-    ninja_cmd.current_dir(temp);
-    if !verbose {
-        ninja_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let ninja_status = ninja_cmd.status()?;
-
-    if !ninja_status.success() {
-        return Ok(Some(ninja_status));
-    }
-
-    if let Some(exe_path) = find_built_executable(Path::new(temp), repo, "ninja") {
-        copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
-        Ok(Some(ninja_status))
-    } else {
-        eprintln!("Could not find executable after build");
-        eprintln!("Searched in: {}", temp);
-        eprintln!("Try running with -v flag to see build output");
-        Ok(None)
-    }
+    build_and_install_binary(temp, install_path, repo, verbose, "ninja", &[], "ninja")
 }
 
 pub fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
@@ -855,7 +859,7 @@ pub fn build_just(
         return Ok(Some(status));
     }
 
-    if let Some(exe_path) = find_built_executable(Path::new(temp), repo, "just") {
+    if let Some(exe_path) = find_built_executable_simple(Path::new(temp), repo, "just") {
         copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
         Ok(Some(status))
     } else {
@@ -866,30 +870,160 @@ pub fn build_just(
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::package::PackageInfo;
+
+    #[test]
+    fn test_build_config_from_info_defaults() {
+        let info = PackageInfo {
+            user: "alice".to_string(),
+            repo: "myrepo".to_string(),
+            latest_commit: "abc123".to_string(),
+            build_system: "cargo".to_string(),
+            package_manager: "unknown".to_string(),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            install_path: "/tmp/install".to_string(),
+            symlink_path: "/tmp/bin/myrepo".to_string(),
+            supplier: "github.com".to_string(),
+            has_data_files: false,
+            system_wide: false,
+            system_deps: vec![],
+            remote_url: None,
+            branch: None,
+            make_target: None,
+            build_flags: None,
+            submodules: false,
+            data_symlinks: vec![],
+            desktop_symlinks: vec![],
+            desktop_file: None,
+        };
+
+        let config = BuildConfig::from_info(&info);
+        assert!(config.make_target.is_none());
+        assert!(config.build_flags.is_none());
+        assert!(!config.submodules);
+        assert!(config.java_home.is_none());
+    }
+
+    #[test]
+    fn test_build_config_from_info_with_values() {
+        let info = PackageInfo {
+            user: "alice".to_string(),
+            repo: "myrepo".to_string(),
+            latest_commit: "abc123".to_string(),
+            build_system: "make".to_string(),
+            package_manager: "apt".to_string(),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            install_path: "/tmp/install".to_string(),
+            symlink_path: "/tmp/bin/myrepo".to_string(),
+            supplier: "github.com".to_string(),
+            has_data_files: false,
+            system_wide: false,
+            system_deps: vec![],
+            remote_url: None,
+            branch: Some("develop".to_string()),
+            make_target: Some("build-release".to_string()),
+            build_flags: Some("-j4".to_string()),
+            submodules: true,
+            data_symlinks: vec![],
+            desktop_symlinks: vec![],
+            desktop_file: None,
+        };
+
+        let config = BuildConfig::from_info(&info);
+        assert_eq!(config.make_target.as_deref(), Some("build-release"));
+        assert_eq!(config.build_flags.as_deref(), Some("-j4"));
+        assert!(config.submodules);
+    }
+
+    #[test]
+    fn test_flags_vec() {
+        let config = BuildConfig {
+            build_flags: Some("-j4 -DCMAKE_BUILD_TYPE=Release".to_string()),
+            ..Default::default()
+        };
+        let flags = config.flags_vec();
+        assert_eq!(flags, vec!["-j4", "-DCMAKE_BUILD_TYPE=Release"]);
+    }
+
+    #[test]
+    fn test_flags_vec_empty() {
+        let config = BuildConfig::default();
+        assert!(config.flags_vec().is_empty());
+    }
+
+    #[test]
+    fn test_flags_vec_quoted() {
+        // shell_words respects shell quoting rules
+        let config = BuildConfig {
+            build_flags: Some(r#"-DFOO='hello world'"#.to_string()),
+            ..Default::default()
+        };
+        let flags = config.flags_vec();
+        assert_eq!(flags, vec![r#"-DFOO=hello world"#]);
+    }
+
+    #[test]
+    fn test_find_executables_in_makefile() {
+        let dir = tempfile::tempdir().unwrap();
+        let makefile = dir.path().join("Makefile");
+        fs::write(
+            &makefile,
+            "all: main\n\nmain: main.o\n\tgcc -o main main.o\n\nclean:\n\trm -f main\n",
+        )
+        .unwrap();
+
+        let targets = find_executables_in_makefile(&makefile, "myrepo");
+        assert!(targets.contains(&"main".to_string()));
+        assert!(targets.contains(&"myrepo".to_string()));
+        assert!(targets.contains(&"myrepo".to_lowercase()));
+        assert!(targets.contains(&"a.out".to_string()));
+    }
+
+    #[test]
+    fn test_find_executables_in_cargo() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_toml = dir.path().join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "my-binary"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+
+        let targets = find_executables_in_cargo(&cargo_toml);
+        assert!(targets.contains(&"my-binary".to_string()));
+    }
+
+    #[test]
+    fn test_find_executables_in_cargo_with_bin() {
+        let dir = tempfile::tempdir().unwrap();
+        let cargo_toml = dir.path().join("Cargo.toml");
+        fs::write(
+            &cargo_toml,
+            r#"[package]
+name = "my-lib"
+version = "0.1.0"
+
+[[bin]]
+name = "my-cli"
+path = "src/main.rs"
+"#,
+        )
+        .unwrap();
+
+        let targets = find_executables_in_cargo(&cargo_toml);
+        assert!(targets.contains(&"my-cli".to_string()));
+        assert!(!targets.contains(&"my-lib".to_string()));
+    }
+}
+
 pub fn build_rake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir)?;
-
-    let mut cmd = Command::new("rake");
-    cmd.current_dir(temp);
-    if !verbose {
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let status = cmd.status()?;
-
-    if !status.success() {
-        return Ok(Some(status));
-    }
-
-    if let Some(exe_path) = find_built_executable(Path::new(temp), repo, "rake") {
-        copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
-        Ok(Some(status))
-    } else {
-        eprintln!("Could not find executable after build");
-        eprintln!("Searched in: {}", temp);
-        eprintln!("Try running with -v flag to see build output");
-        Ok(None)
-    }
+    build_and_install_binary(temp, install_path, repo, verbose, "rake", &[], "rake")
 }
 
 pub fn build_nodejs(

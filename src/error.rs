@@ -43,3 +43,9 @@ impl From<toml::ser::Error> for GitpkgError {
         GitpkgError::Parse(e.to_string())
     }
 }
+
+impl From<toml::de::Error> for GitpkgError {
+    fn from(e: toml::de::Error) -> Self {
+        GitpkgError::Parse(e.to_string())
+    }
+}

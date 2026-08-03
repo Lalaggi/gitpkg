@@ -39,3 +39,49 @@ pub fn dir_size_bytes(path: &Path) -> u64 {
     }
     total
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn test_pascal_to_kebab_case() {
+        assert_eq!(pascal_to_kebab_case("MyApp"), "my-app");
+        assert_eq!(pascal_to_kebab_case("HTMLParser"), "h-t-m-l-parser");
+        assert_eq!(pascal_to_kebab_case("already-kebab"), "already-kebab");
+        assert_eq!(pascal_to_kebab_case("Simple"), "simple");
+        assert_eq!(pascal_to_kebab_case(""), "");
+    }
+
+    #[test]
+    fn test_format_mb() {
+        assert_eq!(format_mb(0), "0.00 MB");
+        assert_eq!(format_mb(1024 * 1024), "1.00 MB");
+        assert_eq!(format_mb(1024 * 1024 * 5 + 512 * 1024), "5.50 MB");
+    }
+
+    #[test]
+    fn test_dir_size_bytes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        fs::write(&file, "hello world").unwrap();
+        assert_eq!(dir_size_bytes(&file), 11);
+    }
+
+    #[test]
+    fn test_dir_size_bytes_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(dir_size_bytes(dir.path()), 0);
+    }
+
+    #[test]
+    fn test_dir_size_bytes_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        fs::create_dir(&sub).unwrap();
+        fs::write(sub.join("a.txt"), "hello").unwrap();
+        fs::write(sub.join("b.txt"), "world!").unwrap();
+        assert_eq!(dir_size_bytes(dir.path()), 11);
+    }
+}

@@ -1,8 +1,28 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use serde::Deserialize;
+
 use crate::error::GitpkgError;
 use crate::package::home_dir;
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct ConfigFile {
+    system: bool,
+    ssh: bool,
+    remove_deps: bool,
+    verbose: bool,
+    submodules: bool,
+    #[serde(default = "default_superuser")]
+    superuser: String,
+    java_home: Option<String>,
+    forge_usernames: HashMap<String, String>,
+}
+
+fn default_superuser() -> String {
+    "auto".to_string()
+}
 
 /// User configuration loaded from `~/.config/gitpkg/config.toml`.
 ///
@@ -38,7 +58,7 @@ impl Config {
             Err(_) => return Ok(Config::default()),
         };
 
-        let value: toml::Value = match toml::from_str(&content) {
+        let file: ConfigFile = match toml::from_str(&content) {
             Ok(v) => v,
             Err(e) => {
                 eprintln!(
@@ -50,40 +70,15 @@ impl Config {
             }
         };
 
-        let get_bool = |key: &str| {
-            value
-                .get(key)
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-        };
-
-        let forge_usernames = value
-            .get("forge_usernames")
-            .and_then(|v| v.as_table())
-            .map(|t| {
-                t.iter()
-                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                    .collect()
-            })
-            .unwrap_or_default();
-
         Ok(Config {
-            system: get_bool("system"),
-            ssh: get_bool("ssh"),
-            remove_deps: get_bool("remove_deps"),
-            verbose: get_bool("verbose"),
-            submodules: get_bool("submodules"),
-            superuser: value
-                .get("superuser")
-                .and_then(|v| v.as_str())
-                .unwrap_or("auto")
-                .to_string(),
-            java_home: value
-                .get("java_home")
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .map(|s| s.to_string()),
-            forge_usernames,
+            system: file.system,
+            ssh: file.ssh,
+            remove_deps: file.remove_deps,
+            verbose: file.verbose,
+            submodules: file.submodules,
+            superuser: file.superuser,
+            java_home: file.java_home.filter(|s| !s.is_empty()),
+            forge_usernames: file.forge_usernames,
         })
     }
 }
@@ -158,4 +153,62 @@ superuser = "auto"
     std::fs::write(&path, template)?;
     println!("Wrote default config to {}", path.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_config_file_deserialize_defaults() {
+        let toml_str = "";
+        let file: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(!file.system);
+        assert!(!file.ssh);
+        assert!(!file.remove_deps);
+        assert!(!file.verbose);
+        assert!(!file.submodules);
+        assert_eq!(file.superuser, "auto");
+        assert!(file.java_home.is_none());
+        assert!(file.forge_usernames.is_empty());
+    }
+
+    #[test]
+    fn test_config_file_deserialize_full() {
+        let toml_str = r#"
+system = true
+ssh = true
+remove_deps = true
+verbose = true
+submodules = true
+superuser = "doas"
+java_home = "/usr/lib/jvm/java-21"
+
+[forge_usernames]
+"codeberg.org" = "alice"
+"github.com" = "bob"
+"#;
+        let file: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(file.system);
+        assert!(file.ssh);
+        assert!(file.remove_deps);
+        assert!(file.verbose);
+        assert!(file.submodules);
+        assert_eq!(file.superuser, "doas");
+        assert_eq!(file.java_home.as_deref(), Some("/usr/lib/jvm/java-21"));
+        assert_eq!(file.forge_usernames.get("codeberg.org").unwrap(), "alice");
+        assert_eq!(file.forge_usernames.get("github.com").unwrap(), "bob");
+    }
+
+    #[test]
+    fn test_config_file_partial() {
+        let toml_str = r#"
+system = true
+superuser = "pkexec"
+"#;
+        let file: ConfigFile = toml::from_str(toml_str).unwrap();
+        assert!(file.system);
+        assert!(!file.ssh);
+        assert_eq!(file.superuser, "pkexec");
+    }
 }

@@ -4,7 +4,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::error::GitpkgError;
 
@@ -158,15 +158,9 @@ pub fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, St
             };
 
             if pkg_user == user && pkg_repo == repo {
-                if let Ok(content) = fs::read_to_string(&info_path) {
-                    if let Ok(info) = toml::from_str::<toml::Value>(&content) {
-                        let supplier = info
-                            .get("supplier")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("github.com")
-                            .to_string();
-                        matches.push((pkg_key, supplier, info_path));
-                    }
+                if let Ok(info) = read_info_file(&info_path) {
+                    let supplier = info.supplier;
+                    matches.push((pkg_key, supplier, info_path));
                 }
             }
         }
@@ -179,15 +173,8 @@ pub fn find_package_by_key(pkg_key: &str) -> Option<(String, String, String)> {
     let packages = read_package_list();
 
     if let Some(info_path) = packages.get(pkg_key) {
-        if let Ok(content) = fs::read_to_string(info_path) {
-            if let Ok(info) = toml::from_str::<toml::Value>(&content) {
-                let supplier = info
-                    .get("supplier")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("github.com")
-                    .to_string();
-                return Some((pkg_key.to_string(), supplier, info_path.clone()));
-            }
+        if let Ok(info) = read_info_file(info_path) {
+            return Some((pkg_key.to_string(), info.supplier, info_path.clone()));
         }
     }
 
@@ -222,6 +209,38 @@ pub fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<
     None
 }
 
+/// Resolve a package argument to its key, supplier, and info file path.
+///
+/// Handles exact key matches, supplier-qualified names, and interactive
+/// selection when multiple packages match.
+pub fn resolve_package(package: &str) -> Result<(String, String, String), GitpkgError> {
+    let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
+
+    let exact_match = find_package_by_key(package);
+
+    if let Some(m) = exact_match {
+        return Ok(m);
+    }
+
+    let matches = find_matching_packages(&user, &repo);
+    if matches.is_empty() {
+        return Err(GitpkgError::PackageNotFound(package.to_string()));
+    }
+
+    let selected = if let Some(ref sup) = supplier_hint {
+        matches.iter().position(|(_, s, _)| s == sup).unwrap_or(0)
+    } else if matches.len() > 1 {
+        match prompt_package_selection(&matches) {
+            Some(idx) => idx,
+            None => return Err(GitpkgError::Cancelled),
+        }
+    } else {
+        0
+    };
+
+    Ok(matches[selected].clone())
+}
+
 pub fn temp_path(user: &str, repo: &str) -> Result<String, GitpkgError> {
     let hash = format!("{:x}", md5::compute(format!("{}{}", user, repo)));
     let h = home_dir_or_err()?;
@@ -250,37 +269,48 @@ fn is_false(b: &bool) -> bool {
     !b
 }
 
-#[derive(Serialize)]
-struct PackageInfo {
-    user: String,
-    repo: String,
-    latest_commit: String,
-    build_system: String,
-    package_manager: String,
-    timestamp: String,
-    install_path: String,
-    symlink_path: String,
-    supplier: String,
-    has_data_files: bool,
-    system_wide: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    system_deps: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    remote_url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    branch: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    make_target: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    build_flags: Option<String>,
-    #[serde(skip_serializing_if = "is_false")]
-    submodules: bool,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    data_symlinks: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    desktop_symlinks: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    desktop_file: Option<String>,
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PackageInfo {
+    pub user: String,
+    pub repo: String,
+    pub latest_commit: String,
+    pub build_system: String,
+    pub package_manager: String,
+    pub timestamp: String,
+    pub install_path: String,
+    pub symlink_path: String,
+    pub supplier: String,
+    #[serde(default)]
+    pub has_data_files: bool,
+    #[serde(default)]
+    pub system_wide: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub system_deps: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub make_target: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_flags: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub submodules: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub data_symlinks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub desktop_symlinks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop_file: Option<String>,
+}
+
+pub fn read_info_file(info_path: &str) -> Result<PackageInfo, GitpkgError> {
+    let content = fs::read_to_string(info_path).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to read info file: {}", e))
+    })?;
+    toml::from_str(&content).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to parse info file: {}", e))
+    })
 }
 
 pub fn write_info(
@@ -350,4 +380,150 @@ pub fn write_info(
     fs::write(&info_file, toml_data)?;
 
     add_to_package_list(user, repo, info_file.to_str().unwrap_or(""), supplier)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_pkg_simple() {
+        let (user, repo) = parse_pkg("alice/myrepo");
+        assert_eq!(user, "alice");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn test_parse_pkg_supplier_prefix() {
+        let (user, repo) = parse_pkg("codeberg_alice/myrepo");
+        assert_eq!(user, "alice");
+        assert_eq!(repo, "myrepo");
+    }
+
+    #[test]
+    fn test_parse_pkg_with_supplier_gh() {
+        // "gh" shortname is not resolved by parse_pkg_with_supplier;
+        // it's only resolved at the CLI level via resolve_supplier_shortname.
+        let (user, repo, supplier) = parse_pkg_with_supplier("gh/alice/myrepo");
+        assert_eq!(user, "gh");
+        assert_eq!(repo, "alice");
+        assert_eq!(supplier, None);
+    }
+
+    #[test]
+    fn test_parse_pkg_with_supplier_codeberg() {
+        let (user, repo, supplier) = parse_pkg_with_supplier("codeberg.org_alice/myrepo");
+        assert_eq!(user, "alice");
+        assert_eq!(repo, "myrepo");
+        assert_eq!(supplier, Some("codeberg.org".to_string()));
+    }
+
+    #[test]
+    fn test_parse_pkg_with_supplier_no_supplier() {
+        let (user, repo, supplier) = parse_pkg_with_supplier("alice/myrepo");
+        assert_eq!(user, "alice");
+        assert_eq!(repo, "myrepo");
+        assert_eq!(supplier, None);
+    }
+
+    #[test]
+    fn test_get_package_key_github() {
+        let key = get_package_key("alice", "myrepo", "github.com");
+        assert_eq!(key, "alice/myrepo");
+    }
+
+    #[test]
+    fn test_get_package_key_codeberg() {
+        let key = get_package_key("alice", "myrepo", "codeberg.org");
+        assert_eq!(key, "codeberg_alice/myrepo");
+    }
+
+    #[test]
+    fn test_package_info_deserialize() {
+        let toml_str = r#"
+user = "alice"
+repo = "myrepo"
+latest_commit = "abc123"
+build_system = "cargo"
+package_manager = "unknown"
+timestamp = "2025-01-01T00:00:00Z"
+install_path = "/home/alice/.local/share/gitpkg/alice/myrepo/abc123"
+symlink_path = "/home/alice/.local/bin/myrepo"
+supplier = "github.com"
+has_data_files = false
+system_wide = false
+"#;
+        let info: PackageInfo = toml::from_str(toml_str).unwrap();
+        assert_eq!(info.user, "alice");
+        assert_eq!(info.repo, "myrepo");
+        assert_eq!(info.latest_commit, "abc123");
+        assert_eq!(info.build_system, "cargo");
+        assert_eq!(info.supplier, "github.com");
+        assert!(!info.has_data_files);
+        assert!(!info.system_wide);
+        assert!(info.system_deps.is_empty());
+        assert!(info.remote_url.is_none());
+    }
+
+    #[test]
+    fn test_package_info_deserialize_optional_fields() {
+        let toml_str = r#"
+user = "alice"
+repo = "myrepo"
+latest_commit = "abc123"
+build_system = "make"
+package_manager = "apt"
+timestamp = "2025-01-01T00:00:00Z"
+install_path = "/tmp/install"
+symlink_path = "/tmp/bin/myrepo"
+supplier = "github.com"
+branch = "develop"
+make_target = "build-release"
+build_flags = "-j4"
+submodules = true
+system_deps = ["gcc", "make"]
+remote_url = "git@github.com:alice/myrepo.git"
+"#;
+        let info: PackageInfo = toml::from_str(toml_str).unwrap();
+        assert_eq!(info.branch.as_deref(), Some("develop"));
+        assert_eq!(info.make_target.as_deref(), Some("build-release"));
+        assert_eq!(info.build_flags.as_deref(), Some("-j4"));
+        assert!(info.submodules);
+        assert_eq!(info.system_deps, vec!["gcc", "make"]);
+        assert_eq!(info.remote_url.as_deref(), Some("git@github.com:alice/myrepo.git"));
+    }
+
+    #[test]
+    fn test_package_info_roundtrip() {
+        let original = PackageInfo {
+            user: "alice".to_string(),
+            repo: "myrepo".to_string(),
+            latest_commit: "abc123".to_string(),
+            build_system: "cargo".to_string(),
+            package_manager: "unknown".to_string(),
+            timestamp: "2025-01-01T00:00:00Z".to_string(),
+            install_path: "/tmp/install".to_string(),
+            symlink_path: "/tmp/bin/myrepo".to_string(),
+            supplier: "github.com".to_string(),
+            has_data_files: false,
+            system_wide: false,
+            system_deps: vec![],
+            remote_url: None,
+            branch: None,
+            make_target: None,
+            build_flags: None,
+            submodules: false,
+            data_symlinks: vec![],
+            desktop_symlinks: vec![],
+            desktop_file: None,
+        };
+
+        let serialized = toml::to_string_pretty(&original).unwrap();
+        let deserialized: PackageInfo = toml::from_str(&serialized).unwrap();
+        assert_eq!(original.user, deserialized.user);
+        assert_eq!(original.repo, deserialized.repo);
+        assert_eq!(original.latest_commit, deserialized.latest_commit);
+        assert_eq!(original.build_system, deserialized.build_system);
+        assert_eq!(original.supplier, deserialized.supplier);
+    }
 }
