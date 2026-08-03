@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -e
 
-REPO="https://codeberg.org/el1lovescomputers/gitpkg.git"
-USER="el1lovescomputers"
+REPO="https://github.com/Lalaggi/gitpkg.git"
+USER="Lalaggi"
 PROJECT="gitpkg"
 CACHE_DIR="$HOME/.cache/gitpkg/$PROJECT"
 
@@ -44,7 +44,7 @@ cp "target/release/$PROJECT" "$INSTALL_DIR/bin/"
 
 # 5. Run gitpkg on itself
 echo "Running gitpkg to install itself..."
-"$INSTALL_DIR/bin/$PROJECT" install "$USER/$PROJECT" --supplier codeberg.org
+"$INSTALL_DIR/bin/$PROJECT" install "$USER/$PROJECT"
 
 # Install bash completion script to user data dir (if present in repo)
 COMPLETION_SRC="$CACHE_DIR/gitpkg-completion.sh"

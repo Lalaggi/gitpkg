@@ -4,6 +4,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use serde::Serialize;
+
 use crate::error::GitpkgError;
 
 /// Resolve the user's home directory without panicking.
@@ -132,6 +134,13 @@ pub fn remove_from_package_list(package_key: &str) -> Result<(), GitpkgError> {
     write_package_list(&packages)
 }
 
+/// Remove the old Codeberg package list entry for a package being migrated.
+/// Called after migration to clean up the orphaned Codeberg key.
+pub fn remove_old_supplier_entry(user: &str, repo: &str, old_supplier: &str) {
+    let old_key = get_package_key(user, repo, old_supplier);
+    let _ = remove_from_package_list(&old_key);
+}
+
 pub fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, String)> {
     let packages = read_package_list();
     let mut matches = Vec::new();
@@ -237,6 +246,43 @@ pub fn install_root(
         .into_owned())
 }
 
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+#[derive(Serialize)]
+struct PackageInfo {
+    user: String,
+    repo: String,
+    latest_commit: String,
+    build_system: String,
+    package_manager: String,
+    timestamp: String,
+    install_path: String,
+    symlink_path: String,
+    supplier: String,
+    has_data_files: bool,
+    system_wide: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    system_deps: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remote_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    make_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    build_flags: Option<String>,
+    #[serde(skip_serializing_if = "is_false")]
+    submodules: bool,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    data_symlinks: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    desktop_symlinks: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    desktop_file: Option<String>,
+}
+
 pub fn write_info(
     user: &str,
     repo: &str,
@@ -269,87 +315,38 @@ pub fn write_info(
     fs::create_dir_all(&info_dir)?;
     let info_file = Path::new(&info_dir).join("info.gitpkg");
 
-    let mut toml_data = format!(
-        "user = \"{}\"\n\
-         repo = \"{}\"\n\
-         latest_commit = \"{}\"\n\
-         build_system = \"{}\"\n\
-         package_manager = \"{}\"\n\
-         timestamp = \"{}\"\n\
-         install_path = \"{}\"\n\
-         symlink_path = \"{}\"\n\
-         supplier = \"{}\"\n\
-         has_data_files = {}\n\
-         system_wide = {}\n",
-        user,
-        repo,
-        commit,
-        build_system,
-        pm,
-        Utc::now().to_rfc3339(),
-        install_path,
-        symlink_path,
-        supplier,
+    let info = PackageInfo {
+        user: user.to_string(),
+        repo: repo.to_string(),
+        latest_commit: commit.to_string(),
+        build_system: build_system.to_string(),
+        package_manager: pm.to_string(),
+        timestamp: Utc::now().to_rfc3339(),
+        install_path: install_path.to_string(),
+        symlink_path: symlink_path.to_string(),
+        supplier: supplier.to_string(),
         has_data_files,
-        system_wide
-    );
+        system_wide,
+        system_deps: installed_deps.to_vec(),
+        remote_url: remote_url
+            .filter(|r| !r.is_empty())
+            .map(|r| r.to_string()),
+        branch: branch.map(|b| b.to_string()),
+        make_target: make_target.map(|t| t.to_string()),
+        build_flags: build_flags.map(|f| f.to_string()),
+        submodules,
+        data_symlinks: data_symlinks
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        desktop_symlinks: desktop_symlinks
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect(),
+        desktop_file: desktop_path.map(|d| d.to_string()),
+    };
 
-    if !installed_deps.is_empty() {
-        toml_data.push_str("system_deps = [\n");
-        for d in installed_deps {
-            toml_data.push_str(&format!("  \"{}\",\n", d));
-        }
-        toml_data.push_str("]\n");
-    }
-
-    if let Some(r) = remote_url {
-        if !r.is_empty() {
-            toml_data.push_str(&format!(
-                "remote_url = \"{}\"\n",
-                r.replace('\\', "\\\\").replace('"', "\\\"")
-            ));
-        }
-    }
-
-    if let Some(b) = branch {
-        toml_data.push_str(&format!("branch = \"{}\"\n", b));
-    }
-
-    if let Some(t) = make_target {
-        toml_data.push_str(&format!("make_target = \"{}\"\n", t));
-    }
-
-    if let Some(f) = build_flags {
-        toml_data.push_str(&format!(
-            "build_flags = \"{}\"\n",
-            f.replace('\\', "\\\\").replace('"', "\\\"")
-        ));
-    }
-
-    if submodules {
-        toml_data.push_str("submodules = true\n");
-    }
-
-    if !data_symlinks.is_empty() {
-        toml_data.push_str("data_symlinks = [\n");
-        for p in data_symlinks {
-            toml_data.push_str(&format!("  \"{}\",\n", p.display()));
-        }
-        toml_data.push_str("]\n");
-    }
-
-    if !desktop_symlinks.is_empty() {
-        toml_data.push_str("desktop_symlinks = [\n");
-        for p in desktop_symlinks {
-            toml_data.push_str(&format!("  \"{}\",\n", p.display()));
-        }
-        toml_data.push_str("]\n");
-    }
-
-    if let Some(dp) = desktop_path {
-        toml_data.push_str(&format!("desktop_file = \"{}\"\n", dp));
-    }
-
+    let toml_data = toml::to_string_pretty(&info)?;
     fs::write(&info_file, toml_data)?;
 
     add_to_package_list(user, repo, info_file.to_str().unwrap_or(""), supplier)

@@ -1,5 +1,6 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::Path;
 use std::process::Command;
 
@@ -23,8 +24,8 @@ use crate::git::{
     run_git_clone_with_progress,
 };
 use crate::package::{
-    find_matching_packages, find_package_by_key, home_dir, home_dir_or_err, install_root,
-    parse_pkg, parse_pkg_with_supplier, prompt_package_selection, read_package_list,
+    find_matching_packages, find_package_by_key, home_dir, home_dir_or_err,
+    install_root, parse_pkg, parse_pkg_with_supplier, prompt_package_selection, read_package_list,
     remove_from_package_list, temp_path, write_info as write_info_file,
 };
 use crate::util::{dir_size_bytes, format_mb};
@@ -198,7 +199,7 @@ pub fn build(
 
         let data_symlinks = create_data_symlinks(Path::new(&install_path), repo, false);
 
-        if user == "el1lovescomputers" && repo == "gitpkg" {
+        if repo == "gitpkg" && (user == "Lalaggi" || user == "el1lovescomputers") {
             if let Some(home) = home_dir() {
                 let completion_src = Path::new(&temp).join("gitpkg-completion.sh");
                 if completion_src.exists() {
@@ -1056,9 +1057,9 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(
 
     let build_config = crate::build::BuildConfig::from_info(&info);
 
-    let supplier_to_use = supplier.unwrap_or(&stored_supplier);
+    let mut supplier_to_use = supplier.unwrap_or(&stored_supplier);
 
-    let stored_remote = info
+    let mut stored_remote = info
         .get("remote_url")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
@@ -1066,6 +1067,17 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(
         .get("system_wide")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+
+    // Migrate gitpkg itself from Codeberg to GitHub
+    let mut migrated = false;
+    if user == "el1lovescomputers" && repo == "gitpkg" && supplier.is_none() {
+        if stored_supplier == "codeberg.org" {
+            println!("Migrating gitpkg source from Codeberg (el1lovescomputers) to GitHub (Lalaggi)...");
+            supplier_to_use = "github.com";
+            stored_remote = None;
+            migrated = true;
+        }
+    }
 
     println!(
         "Checking for updates to {} from {}...",
@@ -1152,6 +1164,11 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(
         )));
     }
 
+    // Clean up old Codeberg package list entry after migration
+    if migrated {
+        crate::package::remove_old_supplier_entry(&user, &repo, &stored_supplier);
+    }
+
     println!(
         "Successfully upgraded {} from {} to {}",
         crate::package::get_package_key(&user, &repo, &stored_supplier),
@@ -1179,6 +1196,201 @@ pub fn upgrade_all(verbose: bool) -> Result<(), GitpkgError> {
     }
 
     println!("\nAll packages checked for updates!");
+    Ok(())
+}
+
+/// Migrate a single package from one supplier to another.
+pub fn migrate(
+    package: &str,
+    destination_supplier: &str,
+    new_username: Option<&str>,
+    _verbose: bool,
+    cfg: &crate::config::Config,
+) -> Result<(), GitpkgError> {
+    let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/')
+    {
+        match find_package_by_key(package) {
+            Some((_pkg_key, sup, path)) => {
+                let (u, r) = parse_pkg(package);
+                (u, r, sup, path)
+            }
+            None => {
+                return Err(GitpkgError::PackageNotFound(package.to_string()));
+            }
+        }
+    } else {
+        let (user, repo) = parse_pkg(package);
+        let matches = find_matching_packages(&user, &repo);
+        if matches.is_empty() {
+            return Err(GitpkgError::PackageNotFound(format!("{}/{}", user, repo)));
+        }
+        let (_pkg_key, stored_supplier, info_path) = if matches.len() > 1 {
+            match prompt_package_selection(&matches) {
+                Some(idx) => matches[idx].clone(),
+                None => return Err(GitpkgError::Cancelled),
+            }
+        } else {
+            matches[0].clone()
+        };
+        (user, repo, stored_supplier, info_path)
+    };
+
+    if stored_supplier == destination_supplier {
+        println!(
+            "{} is already from {}, nothing to migrate",
+            crate::package::get_package_key(&user, &repo, &stored_supplier),
+            destination_supplier
+        );
+        return Ok(());
+    }
+
+    // Resolve new username: CLI flag > config > prompt
+    let resolved_new_username = if let Some(name) = new_username {
+        name.to_string()
+    } else if let Some(name) = cfg.forge_usernames.get(destination_supplier) {
+        name.clone()
+    } else if let Some(name) = cfg.forge_usernames.get(&stored_supplier) {
+        name.clone()
+    } else {
+        print!(
+            "Enter your username on {}: ",
+            destination_supplier
+        );
+        let _ = std::io::stdout().flush();
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let trimmed = input.trim().to_string();
+        if trimmed.is_empty() {
+            return Err(GitpkgError::Parse("Username cannot be empty".into()));
+        }
+        trimmed
+    };
+
+    // Read current info file
+    let info_content = fs::read_to_string(&info_path).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to read info file: {}", e))
+    })?;
+    let mut info: toml::Value = toml::from_str(&info_content).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to parse info file: {}", e))
+    })?;
+
+    // Rewrite remote URL
+    let old_remote = info
+        .get("remote_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new_remote = rewrite_remote_url(old_remote, destination_supplier, &resolved_new_username, &repo);
+
+    // Update info fields
+    let old_key = crate::package::get_package_key(&user, &repo, &stored_supplier);
+    let new_pkg_key = crate::package::get_package_key(&resolved_new_username, &repo, destination_supplier);
+    let old_install_path = info.get("install_path").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let old_symlink_path = info.get("symlink_path").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    if let Some(t) = info.as_table_mut() {
+        t.insert("supplier".to_string(), toml::Value::String(destination_supplier.to_string()));
+        t.insert("user".to_string(), toml::Value::String(resolved_new_username.clone()));
+        t.insert(
+            "remote_url".to_string(),
+            toml::Value::String(new_remote),
+        );
+
+        // Update install_path with new package key
+        if let Some(old_install) = old_install_path {
+            let new_install = old_install.replace(&old_key, &new_pkg_key);
+            t.insert("install_path".to_string(), toml::Value::String(new_install));
+        }
+
+        // Update symlink_path with new install_path
+        if let Some(old_symlink) = old_symlink_path {
+            let new_symlink = old_symlink.replace(&old_key, &new_pkg_key);
+            t.insert("symlink_path".to_string(), toml::Value::String(new_symlink));
+        }
+    }
+
+    // Write updated info file
+    let new_toml = toml::to_string_pretty(&info).map_err(|e| {
+        GitpkgError::Parse(format!("Failed to serialize info: {}", e))
+    })?;
+    fs::write(&info_path, &new_toml)?;
+
+    // Update package list: add new entry, remove old
+    let new_pkg_key = crate::package::get_package_key(&resolved_new_username, &repo, destination_supplier);
+    crate::package::add_to_package_list(&resolved_new_username, &repo, &info_path, destination_supplier)?;
+    crate::package::remove_old_supplier_entry(&user, &repo, &stored_supplier);
+
+    let old_key = crate::package::get_package_key(&user, &repo, &stored_supplier);
+    println!("Migrated {} -> {}", old_key, new_pkg_key);
+    println!(
+        "Source: {} -> {}",
+        stored_supplier, destination_supplier
+    );
+
+    Ok(())
+}
+
+/// Rewrite a remote URL to point to a different supplier/username.
+fn rewrite_remote_url(old_url: &str, new_supplier: &str, new_user: &str, repo: &str) -> String {
+    if old_url.starts_with("git@") {
+        format!("git@{}:{}/{}.git", new_supplier, new_user, repo)
+    } else {
+        format!("https://{}/{}/{}.git", new_supplier, new_user, repo)
+    }
+}
+
+/// Migrate all installed packages from one supplier to another.
+pub fn migrate_all(
+    destination_supplier: &str,
+    new_username: Option<&str>,
+    verbose: bool,
+    cfg: &crate::config::Config,
+) -> Result<(), GitpkgError> {
+    let packages = read_package_list();
+    if packages.is_empty() {
+        println!("No packages installed");
+        return Ok(());
+    }
+
+    // Find packages from the source supplier
+    let mut to_migrate = Vec::new();
+    for (pkg_key, info_path) in &packages {
+        if let Ok(content) = fs::read_to_string(info_path) {
+            if let Ok(info) = toml::from_str::<toml::Value>(&content) {
+                let supplier = info
+                    .get("supplier")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("github.com");
+                if supplier != destination_supplier {
+                    to_migrate.push(pkg_key.clone());
+                }
+            }
+        }
+    }
+
+    if to_migrate.is_empty() {
+        println!(
+            "No packages found to migrate to {}",
+            destination_supplier
+        );
+        return Ok(());
+    }
+
+    println!(
+        "Found {} package(s) to migrate to {}",
+        to_migrate.len(),
+        destination_supplier
+    );
+
+    for pkg_key in &to_migrate {
+        println!("\n--- Migrating {} ---", pkg_key);
+        migrate(pkg_key, destination_supplier, new_username, verbose, cfg)?;
+    }
+
+    println!(
+        "\nMigrated {} package(s) to {}",
+        to_migrate.len(),
+        destination_supplier
+    );
     Ok(())
 }
 

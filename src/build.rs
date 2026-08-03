@@ -401,6 +401,31 @@ pub fn find_built_executable_with_dirs(
     prompt_executable_selection(&all_executables)
 }
 
+/// Copy a found executable into `bin_dir`, set executable permissions, and
+/// print status messages. Returns `Ok(true)` on success.
+fn copy_executable_to_bin_dir(
+    exe_path: &str,
+    repo: &str,
+    bin_dir: &Path,
+    verbose: bool,
+) -> Result<bool, GitpkgError> {
+    if verbose {
+        println!("Found executable: {}", exe_path);
+    }
+    fs::create_dir_all(bin_dir)?;
+    let exe_name = Path::new(exe_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(repo);
+    let dest = bin_dir.join(exe_name);
+    fs::copy(exe_path, &dest)?;
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = fs::metadata(&dest)?.permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&dest, perms)?;
+    Ok(true)
+}
+
 pub fn find_installed_executable(install_path: &Path, repo: &str) -> Option<PathBuf> {
     let bin_dir = install_path.join("bin");
     if !bin_dir.exists() {
@@ -552,27 +577,14 @@ pub fn build_make(
         }
     }
 
-    match find_built_executable_with_dirs(Path::new(temp), repo, "make", &extra_dirs) {
-        Some(exe_path) => {
-            println!("Found executable: {}", exe_path);
-            let exe_name = Path::new(&exe_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(repo);
-            let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest)?;
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms)?;
-            Ok(Some(make_status))
-        }
-        None => {
-            eprintln!("Could not find executable after build");
-            eprintln!("Searched in: {}", temp);
-            eprintln!("Try running with -v flag to see build output");
-            Ok(None)
-        }
+    if let Some(exe_path) = find_built_executable_with_dirs(Path::new(temp), repo, "make", &extra_dirs) {
+        copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
+        Ok(Some(make_status))
+    } else {
+        eprintln!("Could not find executable after build");
+        eprintln!("Searched in: {}", temp);
+        eprintln!("Try running with -v flag to see build output");
+        Ok(None)
     }
 }
 
@@ -629,27 +641,14 @@ pub fn build_cmake(
 
     if exe_path.exists() {
         Ok(Some(install_status))
+    } else if let Some(built_exe) = find_built_executable(&build_dir, repo, "cmake") {
+        copy_executable_to_bin_dir(&built_exe, repo, &bin_dir, verbose)?;
+        Ok(Some(install_status))
     } else {
-        match find_built_executable(&build_dir, repo, "cmake") {
-            Some(built_exe) => {
-                fs::create_dir_all(&bin_dir)?;
-                let exe_name = Path::new(&built_exe)
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or(repo);
-                let dest = bin_dir.join(exe_name);
-                fs::copy(&built_exe, &dest)?;
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&dest)?.permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&dest, perms)?;
-                Ok(Some(install_status))
-            }
-            None => {
-                eprintln!("Could not find executable after build");
-                Ok(None)
-            }
-        }
+        eprintln!("Could not find executable after build");
+        eprintln!("Searched in: {}", temp);
+        eprintln!("Try running with -v flag to see build output");
+        Ok(None)
     }
 }
 
@@ -748,27 +747,14 @@ pub fn build_ninja(
         return Ok(Some(ninja_status));
     }
 
-    match find_built_executable(Path::new(temp), repo, "ninja") {
-        Some(exe_path) => {
-            println!("Found executable: {}", exe_path);
-            let exe_name = Path::new(&exe_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(repo);
-            let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest)?;
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms)?;
-            Ok(Some(ninja_status))
-        }
-        None => {
-            eprintln!("Could not find executable after build");
-            eprintln!("Searched in: {}", temp);
-            eprintln!("Try running with -v flag to see build output");
-            Ok(None)
-        }
+    if let Some(exe_path) = find_built_executable(Path::new(temp), repo, "ninja") {
+        copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
+        Ok(Some(ninja_status))
+    } else {
+        eprintln!("Could not find executable after build");
+        eprintln!("Searched in: {}", temp);
+        eprintln!("Try running with -v flag to see build output");
+        Ok(None)
     }
 }
 
@@ -802,29 +788,14 @@ pub fn build_just(temp: &str, install_path: &str, repo: &str, verbose: bool) -> 
         return Ok(Some(status));
     }
 
-    match find_built_executable(Path::new(temp), repo, "just") {
-        Some(exe_path) => {
-            if verbose {
-                println!("Found executable: {}", exe_path);
-            }
-            let exe_name = Path::new(&exe_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(repo);
-            let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest)?;
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms)?;
-            Ok(Some(status))
-        }
-        None => {
-            eprintln!("Could not find executable after build");
-            eprintln!("Searched in: {}", temp);
-            eprintln!("Try running with -v flag to see build output");
-            Ok(None)
-        }
+    if let Some(exe_path) = find_built_executable(Path::new(temp), repo, "just") {
+        copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
+        Ok(Some(status))
+    } else {
+        eprintln!("Could not find executable after build");
+        eprintln!("Searched in: {}", temp);
+        eprintln!("Try running with -v flag to see build output");
+        Ok(None)
     }
 }
 
@@ -843,29 +814,14 @@ pub fn build_rake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> 
         return Ok(Some(status));
     }
 
-    match find_built_executable(Path::new(temp), repo, "rake") {
-        Some(exe_path) => {
-            if verbose {
-                println!("Found executable: {}", exe_path);
-            }
-            let exe_name = Path::new(&exe_path)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or(repo);
-            let dest = bin_dir.join(exe_name);
-            fs::copy(&exe_path, &dest)?;
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms)?;
-            Ok(Some(status))
-        }
-        None => {
-            eprintln!("Could not find executable after build");
-            eprintln!("Searched in: {}", temp);
-            eprintln!("Try running with -v flag to see build output");
-            Ok(None)
-        }
+    if let Some(exe_path) = find_built_executable(Path::new(temp), repo, "rake") {
+        copy_executable_to_bin_dir(&exe_path, repo, &bin_dir, verbose)?;
+        Ok(Some(status))
+    } else {
+        eprintln!("Could not find executable after build");
+        eprintln!("Searched in: {}", temp);
+        eprintln!("Try running with -v flag to see build output");
+        Ok(None)
     }
 }
 

@@ -45,17 +45,35 @@ Copies included .desktop files into `~/.local/share/applications/`
 
 ### Automatic:
 ```bash
-curl -fsSL "https://codeberg.org/el1lovescomputers/gitpkg/raw/branch/main/install.sh" | sh
+curl -fsSL "https://raw.githubusercontent.com/Lalaggi/gitpkg/main/install.sh" | sh
 ```
 ### Manual:
 ```bash
 cd ~/.cache/
-git clone codeberg.org/el1lovescomputers/gitpkg.git
+git clone https://github.com/Lalaggi/gitpkg.git
 cd gitpkg
 cargo build --release
-./target/release/gitpkg install el1lovescomputers/gitpkg --supplier "codeberg.org"
-
+./target/release/gitpkg install Lalaggi/gitpkg
 ```
+
+---
+
+# Migrating from Codeberg
+
+If you previously installed gitpkg or other packages from Codeberg, you can migrate them to GitHub:
+
+```bash
+# Migrate gitpkg itself (happens automatically on upgrade)
+gitpkg upgrade self
+
+# Migrate all Codeberg packages to GitHub at once
+gitpkg migrate --all --to github
+
+# Migrate a single package
+gitpkg migrate <user>/<repo> --to github
+```
+
+The migrate command updates the package source, remote URL, and package list entries. Old Codeberg directories are left in place and can be cleaned with `gitpkg clean`.
 
 ---
 
@@ -220,6 +238,24 @@ gitpkg config --init
 ```
 
 Write a default config file to `~/.config/gitpkg/config.toml`. The config file can set defaults for `--system`, `--ssh`, `--remove-deps`, `-v`, `--submodules`, and `--superuser`. CLI flags always override config values.
+
+---
+
+### Migrate
+
+```
+gitpkg migrate <user>/<repo> --to <destination>
+gitpkg migrate --all --to <destination>
+```
+
+Migrate a package (or all packages) from one supplier to another. Updates the remote URL, supplier, username, and package list entries. Use `--new-username` to override the config's forge username mapping.
+
+**Examples:**
+```bash
+gitpkg migrate user/repo --to github              # migrate one package
+gitpkg migrate user/repo --to github --new-username Lalaggi  # with explicit username
+gitpkg migrate --all --to github                   # migrate all packages
+```
 
 ---
 

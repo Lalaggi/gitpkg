@@ -116,7 +116,7 @@ pub fn superuser_auth() -> bool {
 
 pub fn resolve_self_alias(arg: &str) -> String {
     if arg == "self" {
-        "el1lovescomputers/gitpkg".to_string()
+        "Lalaggi/gitpkg".to_string()
     } else {
         arg.to_string()
     }

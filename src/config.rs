@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use crate::error::GitpkgError;
@@ -16,6 +17,9 @@ pub struct Config {
     pub submodules: bool,
     /// Superuser provider: "sudo", "pkexec", "doas", or "auto".
     pub superuser: String,
+    /// Username mappings per supplier domain, used by `gitpkg migrate`.
+    /// e.g. { "codeberg.org": "el1lovescomputers", "github.com": "Lalaggi" }
+    pub forge_usernames: HashMap<String, String>,
 }
 
 impl Config {
@@ -51,6 +55,16 @@ impl Config {
                 .unwrap_or(false)
         };
 
+        let forge_usernames = value
+            .get("forge_usernames")
+            .and_then(|v| v.as_table())
+            .map(|t| {
+                t.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         Ok(Config {
             system: get_bool("system"),
             ssh: get_bool("ssh"),
@@ -62,6 +76,7 @@ impl Config {
                 .and_then(|v| v.as_str())
                 .unwrap_or("auto")
                 .to_string(),
+            forge_usernames,
         })
     }
 }
@@ -121,6 +136,12 @@ submodules = false
 # system package installs/removals). One of: sudo, pkexec, doas, auto.
 # "auto" picks the first available provider.
 superuser = "auto"
+
+# Forge username mappings used by `gitpkg migrate`.
+# Maps supplier domain to your username on that supplier.
+[forge_usernames]
+# codeberg.org = "your-codeberg-username"
+# github.com = "your-github-username"
 "#;
 
     std::fs::write(&path, template)?;

@@ -37,3 +37,9 @@ impl From<std::io::Error> for GitpkgError {
         GitpkgError::Io(e)
     }
 }
+
+impl From<toml::ser::Error> for GitpkgError {
+    fn from(e: toml::ser::Error) -> Self {
+        GitpkgError::Parse(e.to_string())
+    }
+}
