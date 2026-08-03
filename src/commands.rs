@@ -1007,33 +1007,42 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(
 
         let matches = find_matching_packages(&user, &repo);
 
-        if matches.is_empty() {
+        if !matches.is_empty() {
+            let (_pkg_key, stored_supplier, info_path) = if matches.len() > 1 && supplier.is_none() {
+                match prompt_package_selection(&matches) {
+                    Some(idx) => matches[idx].clone(),
+                    None => {
+                        return Err(GitpkgError::Cancelled);
+                    }
+                }
+            } else if matches.len() > 1 && supplier.is_some() {
+                let supplier_str = supplier.unwrap();
+                match matches.iter().find(|(_, s, _)| s == supplier_str) {
+                    Some(m) => m.clone(),
+                    None => {
+                        return Err(GitpkgError::PackageNotFound(format!(
+                            "{}/{} from {}",
+                            user, repo, supplier_str
+                        )));
+                    }
+                }
+            } else {
+                matches[0].clone()
+            };
+            (user, repo, stored_supplier, info_path)
+        } else if supplier.is_none() && user == "Lalaggi" && repo == "gitpkg" {
+            // Fallback: check if this is a GitHub package that was previously on Codeberg
+            // (e.g. user ran upgrade with old binary that didn't have migration code)
+            let old_matches = find_matching_packages("el1lovescomputers", "gitpkg");
+            if old_matches.is_empty() {
+                return Err(GitpkgError::PackageNotFound(format!("{}/{}", user, repo)));
+            }
+            println!("Found package under old Codeberg account, migrating...");
+            let (_pkg_key, stored_supplier, info_path) = old_matches[0].clone();
+            ("el1lovescomputers".to_string(), "gitpkg".to_string(), stored_supplier, info_path)
+        } else {
             return Err(GitpkgError::PackageNotFound(format!("{}/{}", user, repo)));
         }
-
-        let (_pkg_key, stored_supplier, info_path) = if matches.len() > 1 && supplier.is_none() {
-            match prompt_package_selection(&matches) {
-                Some(idx) => matches[idx].clone(),
-                None => {
-                    return Err(GitpkgError::Cancelled);
-                }
-            }
-        } else if matches.len() > 1 && supplier.is_some() {
-            let supplier_str = supplier.unwrap();
-            match matches.iter().find(|(_, s, _)| s == supplier_str) {
-                Some(m) => m.clone(),
-                None => {
-                    return Err(GitpkgError::PackageNotFound(format!(
-                        "{}/{} from {}",
-                        user, repo, supplier_str
-                    )));
-                }
-            }
-        } else {
-            matches[0].clone()
-        };
-
-        (user, repo, stored_supplier, info_path)
     };
 
     let info_content = fs::read_to_string(&info_path).map_err(|e| {
