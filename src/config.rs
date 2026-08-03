@@ -140,8 +140,8 @@ superuser = "auto"
 # Forge username mappings used by `gitpkg migrate`.
 # Maps supplier domain to your username on that supplier.
 [forge_usernames]
-# codeberg.org = "your-codeberg-username"
-# github.com = "your-github-username"
+"codeberg.org" = "el1lovescomputers"
+"github.com" = "Lalaggi"
 "#;
 
     std::fs::write(&path, template)?;
