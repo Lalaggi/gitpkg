@@ -1348,6 +1348,8 @@ fn rewrite_remote_url(old_url: &str, new_supplier: &str, new_user: &str, repo: &
 }
 
 /// Migrate all installed packages from one supplier to another.
+/// Only migrates packages where the username matches the configured
+/// forge_usernames for that supplier (i.e. only YOUR packages, not others').
 pub fn migrate_all(
     destination_supplier: &str,
     new_username: Option<&str>,
@@ -1360,7 +1362,7 @@ pub fn migrate_all(
         return Ok(());
     }
 
-    // Find packages from the source supplier
+    // Find packages from non-destination suppliers where username matches config
     let mut to_migrate = Vec::new();
     for (pkg_key, info_path) in &packages {
         if let Ok(content) = fs::read_to_string(info_path) {
@@ -1369,8 +1371,20 @@ pub fn migrate_all(
                     .get("supplier")
                     .and_then(|v| v.as_str())
                     .unwrap_or("github.com");
-                if supplier != destination_supplier {
-                    to_migrate.push(pkg_key.clone());
+                let user = info
+                    .get("user")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+
+                if supplier == destination_supplier {
+                    continue;
+                }
+
+                // Only migrate if username matches the configured username for this supplier
+                if let Some(expected_user) = cfg.forge_usernames.get(supplier) {
+                    if user == expected_user.as_str() {
+                        to_migrate.push(pkg_key.clone());
+                    }
                 }
             }
         }
@@ -1378,7 +1392,7 @@ pub fn migrate_all(
 
     if to_migrate.is_empty() {
         println!(
-            "No packages found to migrate to {}",
+            "No packages found to migrate to {} (configure [forge_usernames] in config.toml)",
             destination_supplier
         );
         return Ok(());
