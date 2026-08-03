@@ -67,7 +67,7 @@ If you previously installed gitpkg or other packages from Codeberg, you can migr
 gitpkg upgrade self
 
 # Migrate all Codeberg packages to GitHub at once
-gitpkg migrate --all --to github
+gitpkg migrate all --to github
 
 # Migrate a single package
 gitpkg migrate <user>/<repo> --to github
@@ -245,7 +245,7 @@ Write a default config file to `~/.config/gitpkg/config.toml`. The config file c
 
 ```
 gitpkg migrate <user>/<repo> --to <destination>
-gitpkg migrate --all --to <destination>
+gitpkg migrate all --to <destination>
 ```
 
 Migrate a package (or all packages) from one supplier to another. Updates the remote URL, supplier, username, and package list entries. Use `--new-username` to override the config's forge username mapping.
@@ -254,7 +254,7 @@ Migrate a package (or all packages) from one supplier to another. Updates the re
 ```bash
 gitpkg migrate user/repo --to github              # migrate one package
 gitpkg migrate user/repo --to github --new-username Lalaggi  # with explicit username
-gitpkg migrate --all --to github                   # migrate all packages
+gitpkg migrate all --to github                   # migrate all packages
 ```
 
 ---
