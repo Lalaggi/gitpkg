@@ -51,6 +51,10 @@ struct Cli {
     #[arg(long = "supplier", alias = "provider", alias = "host", global = true)]
     supplier: Option<String>,
 
+    /// JAVA_HOME used for gradle builds (e.g. /usr/lib/jvm/java-21-openjdk)
+    #[arg(long = "java-home", global = true)]
+    java_home: Option<String>,
+
     /// Clone a specific branch
     #[arg(long = "branch", global = true)]
     branch: Option<String>,
@@ -204,6 +208,8 @@ fn run() -> Result<(), GitpkgError> {
 
     let supplier = cli.supplier.as_deref().map(cli::resolve_supplier_shortname);
 
+    let java_home = cli.java_home.clone().or_else(|| cfg.java_home.clone());
+
     let branch = match &cli.branch {
         Some(b) if b.is_empty() => {
             return Err(GitpkgError::Parse(
@@ -221,9 +227,11 @@ fn run() -> Result<(), GitpkgError> {
             make_target: target.clone(),
             build_flags: flags.clone(),
             submodules,
+            java_home: java_home.clone(),
         },
         _ => crate::build::BuildConfig {
             submodules,
+            java_home: java_home.clone(),
             ..Default::default()
         },
     };

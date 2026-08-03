@@ -16,6 +16,8 @@ pub struct BuildConfig {
     pub make_target: Option<String>,
     pub build_flags: Option<String>,
     pub submodules: bool,
+    /// JAVA_HOME used for gradle builds, if the default JDK is unsuitable.
+    pub java_home: Option<String>,
 }
 
 impl BuildConfig {
@@ -32,10 +34,15 @@ impl BuildConfig {
             .get("submodules")
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
+        let java_home = info
+            .get("java_home")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
         BuildConfig {
             make_target,
             build_flags,
             submodules,
+            java_home,
         }
     }
 
@@ -351,6 +358,8 @@ pub fn find_built_executable_with_dirs(
         build_dir.to_path_buf(),
         build_dir.join("bin"),
         build_dir.join("build"),
+        build_dir.join("build/src"),
+        build_dir.join("build/out"),
         build_dir.join("out"),
         build_dir.join("target"),
         build_dir.join("target/release"),
@@ -476,28 +485,39 @@ pub fn find_installed_executable(install_path: &Path, repo: &str) -> Option<Path
     None
 }
 
-/// Returns true if the project's cargo configuration replaces the crates.io
-/// source with a local `directory` source (i.e. it expects a populated
-/// `vendor/` directory). Such projects require `cargo vendor` to be run
-/// before the build, otherwise `cargo build`/`install` fails offline.
+/// Returns true if the project's own cargo configuration replaces the
+/// crates.io source with a local `directory` source (i.e. it expects a
+/// populated `vendor/` directory). Such projects require `cargo vendor` to be
+/// run before the build, otherwise `cargo build`/`install` fails offline.
 fn cargo_uses_vendor_dir(temp: &str) -> bool {
-    let cargo_home = std::env::var("CARGO_HOME")
-        .unwrap_or_else(|_| format!("{}/.cargo", std::env::var("HOME").unwrap_or_default()));
     let candidates = [
         format!("{}/.cargo/config.toml", temp),
         format!("{}/.cargo/config", temp),
-        format!("{}/config.toml", cargo_home),
-        format!("{}/config", cargo_home),
     ];
     for cfg in candidates {
         if let Ok(content) = fs::read_to_string(&cfg) {
             // A vendored directory source looks like:
             //   [source.<name>]
             //   directory = "vendor"
+            let mut in_source = false;
             for line in content.lines() {
                 let trimmed = line.trim();
-                if trimmed.starts_with("directory") && trimmed.contains('=') {
-                    let val = trimmed.split('=').nth(1).unwrap_or("").trim().trim_matches('"').trim_matches('\'');
+                if trimmed.starts_with("[source.") {
+                    in_source = true;
+                    continue;
+                }
+                if trimmed.starts_with('[') {
+                    in_source = false;
+                    continue;
+                }
+                if in_source && trimmed.starts_with("directory") && trimmed.contains('=') {
+                    let val = trimmed
+                        .split('=')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .trim_matches('"')
+                        .trim_matches('\'');
                     if !val.is_empty() {
                         return true;
                     }
@@ -508,13 +528,12 @@ fn cargo_uses_vendor_dir(temp: &str) -> bool {
     false
 }
 
-pub fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    // Projects that replace crates.io with a vendored directory source need
-    // their `vendor/` populated before `cargo install` can resolve deps.
-    if cargo_uses_vendor_dir(temp) {
+/// Populate the repo's `vendor/` directory when its cargo config expects one.
+fn ensure_cargo_vendor(temp: &str, verbose: bool) {
+    if cargo_uses_vendor_dir(temp) && !Path::new(temp).join("vendor").exists() {
         println!("Vendoring Rust dependencies (cargo vendor)...");
         let mut vendor_cmd = Command::new("cargo");
-        vendor_cmd.arg("vendor").arg("vendor").current_dir(temp);
+        vendor_cmd.arg("vendor").current_dir(temp);
         if !verbose {
             vendor_cmd.stdout(Stdio::null()).stderr(Stdio::null());
         }
@@ -528,6 +547,12 @@ pub fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> Result<Opti
             }
         }
     }
+}
+
+pub fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    // Projects that replace crates.io with a vendored directory source need
+    // their `vendor/` populated before `cargo install` can resolve deps.
+    ensure_cargo_vendor(temp, verbose);
 
     let mut cmd = Command::new("cargo");
     cmd.arg("install")
@@ -551,6 +576,10 @@ pub fn build_make(
 ) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
     fs::create_dir_all(&bin_dir)?;
+
+    // A Makefile may just be a thin wrapper around cargo; if the project's
+    // cargo config expects a vendored source, populate it before `make`.
+    ensure_cargo_vendor(temp, verbose);
 
     let mut make_cmd = Command::new("make");
     make_cmd.current_dir(temp);
@@ -773,12 +802,50 @@ pub fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Re
     Ok(Some(cmd.status()?))
 }
 
-pub fn build_just(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+/// Returns true if the justfile in `temp` defines the named recipe.
+fn just_has_recipe(temp: &str, recipe: &str) -> bool {
+    let Ok(output) = Command::new("just").arg("--list").current_dir(temp).output() else {
+        return false;
+    };
+    if !output.status.success() {
+        return false;
+    }
+    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
+        line.split_whitespace().next() == Some(recipe)
+    })
+}
+
+pub fn build_just(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+    config: &BuildConfig,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
     fs::create_dir_all(&bin_dir)?;
 
+    // Bare `just` runs the justfile's `default` recipe, which is often just a
+    // recipe list (`@just --list`). Prefer an explicit `--target` recipe, then
+    // a conventional `build` recipe, before falling back to `just`.
+    let recipe = config
+        .make_target
+        .as_deref()
+        .filter(|r| just_has_recipe(temp, r))
+        .map(|r| r.to_string())
+        .or_else(|| {
+            if just_has_recipe(temp, "build") {
+                Some("build".to_string())
+            } else {
+                None
+            }
+        });
+
     let mut cmd = Command::new("just");
     cmd.current_dir(temp);
+    if let Some(r) = &recipe {
+        cmd.arg(r);
+    }
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());
     }
@@ -985,6 +1052,7 @@ pub fn build_gradle(
     install_path: &str,
     repo: &str,
     verbose: bool,
+    java_home: Option<&str>,
 ) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
     fs::create_dir_all(&bin_dir)?;
@@ -996,6 +1064,9 @@ pub fn build_gradle(
     } else {
         Command::new("gradle")
     };
+    if let Some(jh) = java_home {
+        cmd.env("JAVA_HOME", jh);
+    }
     cmd.arg("build").arg("--no-daemon").current_dir(temp);
     if !verbose {
         cmd.stdout(Stdio::null()).stderr(Stdio::null());

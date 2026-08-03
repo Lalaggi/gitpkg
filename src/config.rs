@@ -17,6 +17,8 @@ pub struct Config {
     pub submodules: bool,
     /// Superuser provider: "sudo", "pkexec", "doas", or "auto".
     pub superuser: String,
+    /// JAVA_HOME used for gradle builds. Defaults to the ambient JDK when unset.
+    pub java_home: Option<String>,
     /// Username mappings per supplier domain, used by `gitpkg migrate`.
     /// e.g. { "codeberg.org": "el1lovescomputers", "github.com": "Lalaggi" }
     pub forge_usernames: HashMap<String, String>,
@@ -76,6 +78,11 @@ impl Config {
                 .and_then(|v| v.as_str())
                 .unwrap_or("auto")
                 .to_string(),
+            java_home: value
+                .get("java_home")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string()),
             forge_usernames,
         })
     }
@@ -136,6 +143,10 @@ submodules = false
 # system package installs/removals). One of: sudo, pkexec, doas, auto.
 # "auto" picks the first available provider.
 superuser = "auto"
+
+# JAVA_HOME used for gradle builds. Uncomment to override the ambient JDK
+# (e.g. some projects fail on very new JDKs and need an LTS one).
+# java_home = "/usr/lib/jvm/java-21-openjdk"
 
 # Forge username mappings used by `gitpkg migrate`.
 # Maps supplier domain to your username on that supplier.

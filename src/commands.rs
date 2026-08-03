@@ -166,9 +166,9 @@ pub fn build(
         "go" => build_go(&temp, &install_path, repo, verbose)?,
         "npm" | "pnpm" | "yarn" => build_nodejs(&temp, &install_path, repo, verbose, bs)?,
         "electron" => build_electron(&temp, &install_path, repo, verbose)?,
-        "gradle" => build_gradle(&temp, &install_path, repo, verbose)?,
+        "gradle" => build_gradle(&temp, &install_path, repo, verbose, config.java_home.as_deref())?,
         "sh" => build_shell(&temp, &install_path, repo, verbose)?,
-        "just" => build_just(&temp, &install_path, repo, verbose)?,
+        "just" => build_just(&temp, &install_path, repo, verbose, config)?,
         "rake" => build_rake(&temp, &install_path, repo, verbose)?,
         _ => {
             println!("Unsupported build system: {}", bs);
