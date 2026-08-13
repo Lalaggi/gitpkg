@@ -100,10 +100,12 @@ pub fn config_path() -> Option<PathBuf> {
 pub fn write_default() -> std::io::Result<()> {
     let path = match config_path() {
         Some(p) => p,
-        None => return Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "HOME not set; cannot write config",
-        )),
+        None => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "HOME not set; cannot write config",
+            ))
+        }
     };
 
     if path.exists() {

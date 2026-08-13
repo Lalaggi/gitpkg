@@ -78,7 +78,10 @@ pub fn run_git_clone_with_progress(
         }
         if submodules {
             let mut sub = Command::new("git");
-            sub.arg("submodule").arg("update").arg("--init").arg("--recursive");
+            sub.arg("submodule")
+                .arg("update")
+                .arg("--init")
+                .arg("--recursive");
             sub.current_dir(path);
             return run_cmd(sub, true);
         }
@@ -142,7 +145,7 @@ pub fn run_git_clone_with_progress(
                             let filled = (p as usize * bar_width) / 100;
                             let empty = bar_width - filled;
                             let bar = format!("[{}{}]", "#".repeat(filled), " ".repeat(empty));
-                            print!("\rCloning repository {} {}", bar, format!("{:3}%", p));
+                            print!("\rCloning repository {} {:3}%", bar, p);
                             let _ = std::io::stdout().flush();
                         }
                     }
@@ -165,7 +168,10 @@ pub fn run_git_clone_with_progress(
 
     if ok && submodules {
         let mut sub = Command::new("git");
-        sub.arg("submodule").arg("update").arg("--init").arg("--recursive");
+        sub.arg("submodule")
+            .arg("update")
+            .arg("--init")
+            .arg("--recursive");
         sub.current_dir(path);
         return run_cmd(sub, verbose);
     }

@@ -215,9 +215,7 @@ pub fn find_all_executables_recursive(dir: &Path) -> Vec<String> {
 
                 if path.is_dir() {
                     let dir_name = path.file_name().unwrap().to_string_lossy();
-                    if !dir_name.starts_with('.')
-                        && dir_name != "node_modules"
-                    {
+                    if !dir_name.starts_with('.') && dir_name != "node_modules" {
                         search_dir(&path, executables);
                     }
                 } else if path.is_file() {
@@ -575,7 +573,11 @@ fn ensure_cargo_vendor(temp: &str, verbose: bool) {
     }
 }
 
-pub fn build_cargo(temp: &str, install_path: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+pub fn build_cargo(
+    temp: &str,
+    install_path: &str,
+    verbose: bool,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     // Projects that replace crates.io with a vendored directory source need
     // their `vendor/` populated before `cargo install` can resolve deps.
     ensure_cargo_vendor(temp, verbose);
@@ -791,7 +793,12 @@ pub fn build_ninja(
     build_and_install_binary(temp, install_path, repo, verbose, "ninja", &[], "ninja")
 }
 
-pub fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+pub fn build_go(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
     let bin_dir = Path::new(install_path).join("bin");
     fs::create_dir_all(&bin_dir)?;
 
@@ -808,15 +815,19 @@ pub fn build_go(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Re
 
 /// Returns true if the justfile in `temp` defines the named recipe.
 fn just_has_recipe(temp: &str, recipe: &str) -> bool {
-    let Ok(output) = Command::new("just").arg("--list").current_dir(temp).output() else {
+    let Ok(output) = Command::new("just")
+        .arg("--list")
+        .current_dir(temp)
+        .output()
+    else {
         return false;
     };
     if !output.status.success() {
         return false;
     }
-    String::from_utf8_lossy(&output.stdout).lines().any(|line| {
-        line.split_whitespace().next() == Some(recipe)
-    })
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.split_whitespace().next() == Some(recipe))
 }
 
 pub fn build_just(
@@ -870,7 +881,617 @@ pub fn build_just(
     }
 }
 
+pub fn build_rake(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    build_and_install_binary(temp, install_path, repo, verbose, "rake", &[], "rake")
+}
+
+pub fn build_nodejs(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+    js_pm: &str,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir)?;
+
+    let mut install_cmd = Command::new(js_pm);
+    install_cmd.arg("install").current_dir(temp);
+    if !verbose {
+        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let install_status = install_cmd.status()?;
+
+    if !install_status.success() {
+        return Ok(Some(install_status));
+    }
+
+    let package_json_path = Path::new(temp).join("package.json");
+    let has_build_script = fs::read_to_string(&package_json_path)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .map(|j| {
+            j.get("scripts")
+                .and_then(|s| s.get("build"))
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .is_some()
+        })
+        .unwrap_or(false);
+
+    if has_build_script {
+        let mut build_cmd = Command::new(js_pm);
+        build_cmd.arg("run").arg("build").current_dir(temp);
+        if !verbose {
+            build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let _ = build_cmd.status();
+    }
+
+    let package_json = Path::new(temp).join("package.json");
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            if let Some(bin) = json.get("bin") {
+                let bin_path = if bin.is_string() {
+                    bin.as_str().map(|s| Path::new(temp).join(s))
+                } else if let Some(obj) = bin.as_object() {
+                    obj.get(repo)
+                        .and_then(|v| v.as_str())
+                        .map(|s| Path::new(temp).join(s))
+                } else {
+                    None
+                };
+
+                if let Some(src) = bin_path {
+                    if src.exists() {
+                        let dest = bin_dir.join(repo);
+                        if src.extension().and_then(|e| e.to_str()) == Some("js") {
+                            let wrapper =
+                                format!("#!/usr/bin/env node\nrequire('{}');", src.display());
+                            fs::write(&dest, wrapper)?;
+                            let mut perms = fs::metadata(&dest)?.permissions();
+                            perms.set_mode(0o755);
+                            fs::set_permissions(&dest, perms)?;
+                        } else {
+                            fs::copy(&src, &dest)?;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    println!("Note: {} package installed at {}", js_pm, install_path);
+    Ok(Some(install_status))
+}
+
+pub fn build_electron(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    use std::os::unix::fs::PermissionsExt;
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir)?;
+
+    let js_pm = detect_js_package_manager(temp);
+
+    let mut install_cmd = Command::new(js_pm);
+    install_cmd.arg("install").current_dir(temp);
+    if !verbose {
+        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let install_status = install_cmd.status()?;
+
+    if !install_status.success() {
+        return Ok(Some(install_status));
+    }
+
+    let package_json = Path::new(temp).join("package.json");
+    let build_scripts = ["build:app", "build:web", "build:electron", "build"];
+    if let Ok(content) = fs::read_to_string(&package_json) {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+            let scripts = json.get("scripts").and_then(|v| v.as_object());
+            for script in &build_scripts {
+                if scripts
+                    .and_then(|s| s.get(*script))
+                    .and_then(|v| v.as_str())
+                    .is_some()
+                {
+                    let mut build_cmd = Command::new(js_pm);
+                    build_cmd.arg("run").arg(script).current_dir(temp);
+                    if !verbose {
+                        build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+                    }
+                    let _ = build_cmd.status();
+                }
+            }
+        }
+    }
+
+    let main_entry = fs::read_to_string(&package_json)
+        .ok()
+        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+        .and_then(|j| {
+            j.get("main")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+        });
+
+    let electron_dir = Path::new(install_path).join("electron");
+    if electron_dir.exists() {
+        fs::remove_dir_all(&electron_dir)?;
+    }
+    fs::create_dir_all(electron_dir.parent().unwrap_or(Path::new(install_path)))?;
+    fs::rename(temp, &electron_dir)?;
+
+    if let Some(main) = main_entry {
+        let src = electron_dir.join(&main);
+        let dest = bin_dir.join(repo);
+        let wrapper = format!(
+            "#!/bin/sh\n# Edit flags below if electron has display issues (e.g. NVIDIA on Wayland)\nexec electron {} \"$@\"\n",
+            src.display()
+        );
+        fs::write(&dest, wrapper)?;
+        let mut perms = fs::metadata(&dest)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&dest, perms)?;
+    }
+
+    println!("Note: electron package installed at {}", install_path);
+    Ok(Some(install_status))
+}
+
+pub fn build_gradle(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+    java_home: Option<&str>,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir)?;
+
+    let mut cmd = if Path::new(temp).join("gradlew").exists() {
+        let mut c = Command::new("sh");
+        c.arg(Path::new(temp).join("gradlew"));
+        c
+    } else {
+        Command::new("gradle")
+    };
+    if let Some(jh) = java_home {
+        cmd.env("JAVA_HOME", jh);
+    }
+    cmd.arg("build").arg("--no-daemon").current_dir(temp);
+    if !verbose {
+        cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let status = cmd.status()?;
+
+    if status.success() {
+        let build_libs = Path::new(temp).join("build/libs");
+        if let Ok(entries) = fs::read_dir(&build_libs) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("jar") {
+                    let dest_jar = bin_dir.join(format!("{}.jar", repo));
+                    fs::copy(&path, &dest_jar)?;
+
+                    let wrapper = bin_dir.join(repo);
+                    let script = format!(
+                        "#!/bin/bash\nexec java -jar \"{}\" \"$@\"",
+                        dest_jar.display()
+                    );
+                    fs::write(&wrapper, script)?;
+                    use std::os::unix::fs::PermissionsExt;
+                    let mut perms = fs::metadata(&wrapper)?.permissions();
+                    perms.set_mode(0o755);
+                    fs::set_permissions(&wrapper, perms)?;
+                    break;
+                }
+            }
+        }
+    }
+
+    Ok(Some(status))
+}
+
+pub fn build_shell(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    let bin_dir = Path::new(install_path).join("bin");
+    fs::create_dir_all(&bin_dir)?;
+
+    let find_script = |temp: &str, repo: &str| -> Option<std::path::PathBuf> {
+        let base = Path::new(temp);
+
+        let exact = base.join(repo);
+        if exact.is_file() {
+            return Some(exact);
+        }
+
+        let sh = base.join(format!("{}.sh", repo));
+        if sh.is_file() {
+            return Some(sh);
+        }
+
+        if let Ok(entries) = fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("sh") {
+                    return Some(path);
+                }
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if !path.is_file() || path.extension().is_some() {
+                    continue;
+                }
+                if let Ok(mut f) = std::fs::File::open(&path) {
+                    let mut buf = [0u8; 64];
+                    use std::io::Read;
+                    if f.read_exact(&mut buf).is_ok() {
+                        let head = String::from_utf8_lossy(&buf);
+                        if head.starts_with("#!")
+                            && (head.contains("/sh")
+                                || head.contains("/bash")
+                                || head.contains("/zsh")
+                                || head.contains("/dash")
+                                || head.contains("/ksh")
+                                || head.contains("/env bash")
+                                || head.contains("/env sh"))
+                        {
+                            return Some(path);
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    };
+
+    let script = match find_script(temp, repo) {
+        Some(s) => s,
+        None => {
+            eprintln!("Could not find shell script in {}", temp);
+            return Ok(None);
+        }
+    };
+
+    if verbose {
+        println!("Found script: {}", script.display());
+    }
+
+    let dest = bin_dir.join(repo);
+    match fs::copy(&script, &dest) {
+        Ok(_) => {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&dest)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&dest, perms)?;
+            use std::os::unix::process::ExitStatusExt;
+            Ok(Some(std::process::ExitStatus::from_raw(0)))
+        }
+        Err(e) => {
+            eprintln!("Failed to copy script: {}", e);
+            Ok(None)
+        }
+    }
+}
+
+pub fn build_python(
+    temp: &str,
+    install_path: &str,
+    repo: &str,
+    verbose: bool,
+) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::process::ExitStatusExt;
+
+    let python_cmd = if is_installed("python3") {
+        "python3"
+    } else if is_installed("python") {
+        "python"
+    } else {
+        eprintln!("Python not found on PATH; cannot build python package");
+        return Ok(None);
+    };
+
+    let temp_path = Path::new(temp);
+
+    let has_pyproject = temp_path.join("pyproject.toml").exists()
+        || temp_path.join("setup.py").exists()
+        || temp_path.join("setup.cfg").exists()
+        || temp_path.join("Pipfile").exists()
+        || temp_path.join("poetry.lock").exists();
+    let has_requirements = temp_path.join("requirements.txt").exists();
+
+    let bin_dir = Path::new(install_path).join("bin");
+    if let Err(e) = fs::create_dir_all(&bin_dir) {
+        eprintln!(
+            "Failed to create bin directory {}: {}",
+            bin_dir.display(),
+            e
+        );
+        return Ok(None);
+    }
+
+    let venv_dir = Path::new(install_path).join("venv");
+
+    if venv_dir.exists() {
+        let _ = fs::remove_dir_all(&venv_dir);
+    }
+
+    if let Err(e) = fs::create_dir_all(&venv_dir) {
+        eprintln!(
+            "Failed to create venv directory {}: {}",
+            venv_dir.display(),
+            e
+        );
+        return Ok(None);
+    }
+
+    println!("Creating virtualenv at {}", venv_dir.display());
+    let mut venv_cmd = Command::new(python_cmd);
+    venv_cmd.arg("-m").arg("venv").arg(&venv_dir);
+    if !verbose {
+        venv_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let venv_status = venv_cmd.status()?;
+    if !venv_status.success() {
+        eprintln!("Failed to create virtualenv. On Debian/Ubuntu, try: apt install python3-venv");
+        let _ = fs::remove_dir_all(&venv_dir);
+        return Ok(Some(venv_status));
+    }
+
+    let venv_python = venv_dir.join("bin").join("python");
+    if !venv_python.exists() {
+        eprintln!(
+            "Virtualenv created but python binary not found at {}",
+            venv_python.display()
+        );
+        let _ = fs::remove_dir_all(&venv_dir);
+        return Ok(None);
+    }
+
+    let mut pip_upgrade = Command::new(&venv_python);
+    pip_upgrade
+        .arg("-m")
+        .arg("pip")
+        .arg("install")
+        .arg("--no-cache-dir")
+        .arg("--upgrade")
+        .arg("pip")
+        .arg("setuptools")
+        .arg("wheel");
+    if !verbose {
+        pip_upgrade.stdout(Stdio::null()).stderr(Stdio::null());
+    }
+    let _ = pip_upgrade.status();
+
+    let req_file = temp_path.join("requirements.txt");
+    if req_file.exists() {
+        println!("Installing requirements in venv...");
+        let mut req_cmd = Command::new(&venv_python);
+        req_cmd
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--no-cache-dir")
+            .arg("-r")
+            .arg(&req_file);
+        if !verbose {
+            req_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let req_status = req_cmd.status()?;
+        if !req_status.success() {
+            eprintln!("Failed to install requirements.txt, cleaning up venv...");
+            let _ = fs::remove_dir_all(&venv_dir);
+            return Ok(Some(req_status));
+        }
+    }
+
+    let install_status = if has_pyproject {
+        let mut install_cmd = Command::new(&venv_python);
+        install_cmd
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--no-cache-dir")
+            .arg(".")
+            .current_dir(temp);
+        if !verbose {
+            install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
+        }
+        let status = install_cmd.status()?;
+        if !status.success() {
+            eprintln!("pip install failed for python package, cleaning up venv...");
+            let _ = fs::remove_dir_all(&venv_dir);
+            return Ok(Some(status));
+        }
+        Some(status)
+    } else {
+        None
+    };
+
+    let venv_bin = venv_dir.join("bin");
+    let venv_python_names = ["python", "python3", "pip", "pip3", "wheel", "easy_install"];
+    if let Ok(entries) = fs::read_dir(&venv_bin) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    if venv_python_names.contains(&name) || name.ends_with(".pyc") {
+                        continue;
+                    }
+
+                    let wrapper = bin_dir.join(name);
+                    let script = format!(
+                        "#!/bin/bash\n# Autogenerated wrapper for python package {}\nexport GITPKG_PACKAGE_ROOT=\"{}\"\nexec \"{}\" \"$@\"\n",
+                        repo,
+                        install_path,
+                        path.display()
+                    );
+                    if let Err(e) = fs::write(&wrapper, script) {
+                        eprintln!("Failed to write wrapper {}: {}", wrapper.display(), e);
+                        continue;
+                    }
+                    if let Ok(meta) = fs::metadata(&wrapper) {
+                        let mut perms = meta.permissions();
+                        perms.set_mode(0o755);
+                        if let Err(e) = fs::set_permissions(&wrapper, perms) {
+                            eprintln!("Failed to set permissions on {}: {}", wrapper.display(), e);
+                        }
+                    }
+                    println!("Installed python console script wrapper: {}", name);
+                }
+            }
+        }
+    }
+
+    if !has_pyproject {
+        if let Some((script_name, script_path)) = find_main_python_script(temp_path, repo) {
+            let lib_dir = Path::new(install_path).join("lib").join(repo);
+            if let Err(e) = fs::create_dir_all(&lib_dir) {
+                eprintln!(
+                    "Failed to create lib directory {}: {}",
+                    lib_dir.display(),
+                    e
+                );
+                return Ok(install_status);
+            }
+
+            let dest_script = lib_dir.join(&script_name);
+            if let Err(e) = fs::copy(&script_path, &dest_script) {
+                eprintln!(
+                    "Failed to copy script {} to {}: {}",
+                    script_path.display(),
+                    dest_script.display(),
+                    e
+                );
+                return Ok(install_status);
+            }
+
+            if let Ok(meta) = fs::metadata(&dest_script) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o755);
+                let _ = fs::set_permissions(&dest_script, perms);
+            }
+
+            if let Ok(content) = fs::read_to_string(&dest_script) {
+                if !content.starts_with("#!") {
+                    let new_content = format!("#!/usr/bin/env python3\n{}", content);
+                    if let Err(e) = fs::write(&dest_script, new_content) {
+                        eprintln!("Failed to add shebang to {}: {}", dest_script.display(), e);
+                    }
+                    if let Ok(meta) = fs::metadata(&dest_script) {
+                        let mut perms = meta.permissions();
+                        perms.set_mode(0o755);
+                        let _ = fs::set_permissions(&dest_script, perms);
+                    }
+                }
+            }
+
+            let exe_name = script_name.strip_suffix(".py").unwrap_or(&script_name);
+            let symlink_path = bin_dir.join(exe_name);
+            let _ = fs::remove_file(&symlink_path);
+            if let Err(e) = std::os::unix::fs::symlink(&dest_script, &symlink_path) {
+                eprintln!("Failed to create symlink: {}", e);
+            } else {
+                println!("Created symlink: {} -> {}", exe_name, dest_script.display());
+            }
+        } else if !has_requirements {
+            eprintln!("No python script found (expected main.py, app.py, or <repo>.py)");
+        }
+    }
+
+    Ok(install_status.or(Some(std::process::ExitStatus::from_raw(0))))
+}
+
+fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)> {
+    let repo_name_path = temp.join(repo);
+    if repo_name_path.is_file() && is_python_file(&repo_name_path) {
+        return Some((repo.to_string(), repo_name_path));
+    }
+
+    let candidates: Vec<String> = vec![
+        "main.py".to_string(),
+        "app.py".to_string(),
+        "cli.py".to_string(),
+        "run.py".to_string(),
+        "start.py".to_string(),
+        "script.py".to_string(),
+        "entrypoint.py".to_string(),
+    ];
+
+    for candidate in &candidates {
+        let path = temp.join(candidate);
+        if path.exists() && path.is_file() && is_python_file(&path) {
+            return Some((candidate.clone(), path));
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(temp) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && is_python_file(&path) {
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("script")
+                    .to_string();
+                if name == "setup.py" || name.starts_with("test_") || name.starts_with("_") {
+                    continue;
+                }
+                return Some((name, path));
+            }
+        }
+    }
+
+    if let Ok(entries) = fs::read_dir(temp) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if dir_name.starts_with(".") || dir_name == "__pycache__" || dir_name == "venv" {
+                    continue;
+                }
+                if let Ok(subentries) = fs::read_dir(&path) {
+                    for subentry in subentries.flatten() {
+                        let sub_path = subentry.path();
+                        if sub_path.is_file() && is_python_file(&sub_path) {
+                            let name = sub_path
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("script")
+                                .to_string();
+                            return Some((name, sub_path));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod tests {
     use super::*;
     use crate::package::PackageInfo;
@@ -1020,602 +1641,4 @@ path = "src/main.rs"
         assert!(targets.contains(&"my-cli".to_string()));
         assert!(!targets.contains(&"my-lib".to_string()));
     }
-}
-
-pub fn build_rake(temp: &str, install_path: &str, repo: &str, verbose: bool) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    build_and_install_binary(temp, install_path, repo, verbose, "rake", &[], "rake")
-}
-
-pub fn build_nodejs(
-    temp: &str,
-    install_path: &str,
-    repo: &str,
-    verbose: bool,
-    js_pm: &str,
-) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    use std::os::unix::fs::PermissionsExt;
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir)?;
-
-    let mut install_cmd = Command::new(js_pm);
-    install_cmd.arg("install").current_dir(temp);
-    if !verbose {
-        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let install_status = install_cmd.status()?;
-
-    if !install_status.success() {
-        return Ok(Some(install_status));
-    }
-
-    let package_json_path = Path::new(temp).join("package.json");
-    let has_build_script = fs::read_to_string(&package_json_path)
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .map(|j| {
-            j.get("scripts")
-                .and_then(|s| s.get("build"))
-                .and_then(|v| v.as_str())
-                .filter(|s| !s.is_empty())
-                .is_some()
-        })
-        .unwrap_or(false);
-
-    if has_build_script {
-        let mut build_cmd = Command::new(js_pm);
-        build_cmd.arg("run").arg("build").current_dir(temp);
-        if !verbose {
-            build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-        let _ = build_cmd.status();
-    }
-
-    let package_json = Path::new(temp).join("package.json");
-    if let Ok(content) = fs::read_to_string(&package_json) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            if let Some(bin) = json.get("bin") {
-                let bin_path = if bin.is_string() {
-                    bin.as_str().map(|s| Path::new(temp).join(s))
-                } else if let Some(obj) = bin.as_object() {
-                    obj.get(repo)
-                        .and_then(|v| v.as_str())
-                        .map(|s| Path::new(temp).join(s))
-                } else {
-                    None
-                };
-
-                if let Some(src) = bin_path {
-                    if src.exists() {
-                        let dest = bin_dir.join(repo);
-                        if src.extension().and_then(|e| e.to_str()) == Some("js") {
-                            let wrapper =
-                                format!("#!/usr/bin/env node\nrequire('{}');", src.display());
-                            fs::write(&dest, wrapper)?;
-                            let mut perms = fs::metadata(&dest)?.permissions();
-                            perms.set_mode(0o755);
-                            fs::set_permissions(&dest, perms)?;
-                        } else {
-                            fs::copy(&src, &dest)?;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    println!("Note: {} package installed at {}", js_pm, install_path);
-    Ok(Some(install_status))
-}
-
-pub fn build_electron(
-    temp: &str,
-    install_path: &str,
-    repo: &str,
-    verbose: bool,
-) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    use std::os::unix::fs::PermissionsExt;
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir)?;
-
-    let js_pm = detect_js_package_manager(temp);
-
-    let mut install_cmd = Command::new(js_pm);
-    install_cmd.arg("install").current_dir(temp);
-    if !verbose {
-        install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let install_status = install_cmd.status()?;
-
-    if !install_status.success() {
-        return Ok(Some(install_status));
-    }
-
-    let package_json = Path::new(temp).join("package.json");
-    let build_scripts = ["build:app", "build:web", "build:electron", "build"];
-    if let Ok(content) = fs::read_to_string(&package_json) {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-            let scripts = json.get("scripts").and_then(|v| v.as_object());
-            for script in &build_scripts {
-                if scripts
-                    .and_then(|s| s.get(*script))
-                    .and_then(|v| v.as_str())
-                    .is_some()
-                {
-                    let mut build_cmd = Command::new(js_pm);
-                    build_cmd.arg("run").arg(script).current_dir(temp);
-                    if !verbose {
-                        build_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-                    }
-                    let _ = build_cmd.status();
-                }
-            }
-        }
-    }
-
-    let main_entry = fs::read_to_string(&package_json)
-        .ok()
-        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-        .and_then(|j| j.get("main").and_then(|v| v.as_str()).map(|s| s.to_string()));
-
-    let electron_dir = Path::new(install_path).join("electron");
-    if electron_dir.exists() {
-        fs::remove_dir_all(&electron_dir)?;
-    }
-    fs::create_dir_all(electron_dir.parent().unwrap_or(Path::new(install_path)))?;
-    fs::rename(temp, &electron_dir)?;
-
-    if let Some(main) = main_entry {
-        let src = electron_dir.join(&main);
-        let dest = bin_dir.join(repo);
-        let wrapper = format!(
-            "#!/bin/sh\n# Edit flags below if electron has display issues (e.g. NVIDIA on Wayland)\nexec electron {} \"$@\"\n",
-            src.display()
-        );
-        fs::write(&dest, wrapper)?;
-        let mut perms = fs::metadata(&dest)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&dest, perms)?;
-    }
-
-    println!("Note: electron package installed at {}", install_path);
-    Ok(Some(install_status))
-}
-
-pub fn build_gradle(
-    temp: &str,
-    install_path: &str,
-    repo: &str,
-    verbose: bool,
-    java_home: Option<&str>,
-) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir)?;
-
-    let mut cmd = if Path::new(temp).join("gradlew").exists() {
-        let mut c = Command::new("sh");
-        c.arg(Path::new(temp).join("gradlew"));
-        c
-    } else {
-        Command::new("gradle")
-    };
-    if let Some(jh) = java_home {
-        cmd.env("JAVA_HOME", jh);
-    }
-    cmd.arg("build").arg("--no-daemon").current_dir(temp);
-    if !verbose {
-        cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let status = cmd.status()?;
-
-    if status.success() {
-        let build_libs = Path::new(temp).join("build/libs");
-        if let Ok(entries) = fs::read_dir(&build_libs) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("jar") {
-                    let dest_jar = bin_dir.join(format!("{}.jar", repo));
-                    fs::copy(&path, &dest_jar)?;
-
-                    let wrapper = bin_dir.join(repo);
-                    let script = format!(
-                        "#!/bin/bash\nexec java -jar \"{}\" \"$@\"",
-                        dest_jar.display()
-                    );
-                    fs::write(&wrapper, script)?;
-                    use std::os::unix::fs::PermissionsExt;
-                    let mut perms = fs::metadata(&wrapper)?.permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&wrapper, perms)?;
-                    break;
-                }
-            }
-        }
-    }
-
-    Ok(Some(status))
-}
-
-pub fn build_shell(
-    temp: &str,
-    install_path: &str,
-    repo: &str,
-    verbose: bool,
-) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    let bin_dir = Path::new(install_path).join("bin");
-    fs::create_dir_all(&bin_dir)?;
-
-    let find_script = |temp: &str, repo: &str| -> Option<std::path::PathBuf> {
-        let base = Path::new(temp);
-
-        let exact = base.join(repo);
-        if exact.is_file() {
-            return Some(exact);
-        }
-
-        let sh = base.join(format!("{}.sh", repo));
-        if sh.is_file() {
-            return Some(sh);
-        }
-
-        if let Ok(entries) = fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_file()
-                    && path.extension().and_then(|e| e.to_str()) == Some("sh")
-                {
-                    return Some(path);
-                }
-            }
-        }
-
-        if let Ok(entries) = fs::read_dir(base) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if !path.is_file() || path.extension().is_some() {
-                    continue;
-                }
-                if let Ok(mut f) = std::fs::File::open(&path) {
-                    let mut buf = [0u8; 64];
-                    use std::io::Read;
-                    if f.read_exact(&mut buf).is_ok() {
-                        let head = String::from_utf8_lossy(&buf);
-                        if head.starts_with("#!") && (head.contains("/sh")
-                            || head.contains("/bash") || head.contains("/zsh")
-                            || head.contains("/dash") || head.contains("/ksh")
-                            || head.contains("/env bash") || head.contains("/env sh"))
-                        {
-                            return Some(path);
-                        }
-                    }
-                }
-            }
-        }
-
-        None
-    };
-
-    let script = match find_script(temp, repo) {
-        Some(s) => s,
-        None => {
-            eprintln!("Could not find shell script in {}", temp);
-            return Ok(None);
-        }
-    };
-
-    if verbose {
-        println!("Found script: {}", script.display());
-    }
-
-    let dest = bin_dir.join(repo);
-    match fs::copy(&script, &dest) {
-        Ok(_) => {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&dest)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&dest, perms)?;
-            use std::os::unix::process::ExitStatusExt;
-            Ok(Some(std::process::ExitStatus::from_raw(0)))
-        }
-        Err(e) => {
-            eprintln!("Failed to copy script: {}", e);
-            Ok(None)
-        }
-    }
-}
-
-pub fn build_python(
-    temp: &str,
-    install_path: &str,
-    repo: &str,
-    verbose: bool,
-) -> Result<Option<std::process::ExitStatus>, GitpkgError> {
-    use std::os::unix::fs::PermissionsExt;
-    use std::os::unix::process::ExitStatusExt;
-
-    let python_cmd = if is_installed("python3") {
-        "python3"
-    } else if is_installed("python") {
-        "python"
-    } else {
-        eprintln!("Python not found on PATH; cannot build python package");
-        return Ok(None);
-    };
-
-    let temp_path = Path::new(temp);
-
-    let has_pyproject = temp_path.join("pyproject.toml").exists()
-        || temp_path.join("setup.py").exists()
-        || temp_path.join("setup.cfg").exists()
-        || temp_path.join("Pipfile").exists()
-        || temp_path.join("poetry.lock").exists();
-    let has_requirements = temp_path.join("requirements.txt").exists();
-
-    let bin_dir = Path::new(install_path).join("bin");
-    if let Err(e) = fs::create_dir_all(&bin_dir) {
-        eprintln!("Failed to create bin directory {}: {}", bin_dir.display(), e);
-        return Ok(None);
-    }
-
-    let venv_dir = Path::new(install_path).join("venv");
-
-    if venv_dir.exists() {
-        let _ = fs::remove_dir_all(&venv_dir);
-    }
-
-    if let Err(e) = fs::create_dir_all(&venv_dir) {
-        eprintln!("Failed to create venv directory {}: {}", venv_dir.display(), e);
-        return Ok(None);
-    }
-
-    println!("Creating virtualenv at {}", venv_dir.display());
-    let mut venv_cmd = Command::new(python_cmd);
-    venv_cmd.arg("-m").arg("venv").arg(&venv_dir);
-    if !verbose {
-        venv_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let venv_status = venv_cmd.status()?;
-    if !venv_status.success() {
-        eprintln!("Failed to create virtualenv. On Debian/Ubuntu, try: apt install python3-venv");
-        let _ = fs::remove_dir_all(&venv_dir);
-        return Ok(Some(venv_status));
-    }
-
-    let venv_python = venv_dir.join("bin").join("python");
-    if !venv_python.exists() {
-        eprintln!(
-            "Virtualenv created but python binary not found at {}",
-            venv_python.display()
-        );
-        let _ = fs::remove_dir_all(&venv_dir);
-        return Ok(None);
-    }
-
-    let mut pip_upgrade = Command::new(&venv_python);
-    pip_upgrade
-        .arg("-m")
-        .arg("pip")
-        .arg("install")
-        .arg("--no-cache-dir")
-        .arg("--upgrade")
-        .arg("pip")
-        .arg("setuptools")
-        .arg("wheel");
-    if !verbose {
-        pip_upgrade.stdout(Stdio::null()).stderr(Stdio::null());
-    }
-    let _ = pip_upgrade.status();
-
-    let req_file = temp_path.join("requirements.txt");
-    if req_file.exists() {
-        println!("Installing requirements in venv...");
-        let mut req_cmd = Command::new(&venv_python);
-        req_cmd
-            .arg("-m")
-            .arg("pip")
-            .arg("install")
-            .arg("--no-cache-dir")
-            .arg("-r")
-            .arg(&req_file);
-        if !verbose {
-            req_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-        let req_status = req_cmd.status()?;
-        if !req_status.success() {
-            eprintln!("Failed to install requirements.txt, cleaning up venv...");
-            let _ = fs::remove_dir_all(&venv_dir);
-            return Ok(Some(req_status));
-        }
-    }
-
-    let install_status = if has_pyproject {
-        let mut install_cmd = Command::new(&venv_python);
-        install_cmd
-            .arg("-m")
-            .arg("pip")
-            .arg("install")
-            .arg("--no-cache-dir")
-            .arg(".")
-            .current_dir(temp);
-        if !verbose {
-            install_cmd.stdout(Stdio::null()).stderr(Stdio::null());
-        }
-        let status = install_cmd.status()?;
-        if !status.success() {
-            eprintln!("pip install failed for python package, cleaning up venv...");
-            let _ = fs::remove_dir_all(&venv_dir);
-            return Ok(Some(status));
-        }
-        Some(status)
-    } else {
-        None
-    };
-
-    let venv_bin = venv_dir.join("bin");
-    let venv_python_names = ["python", "python3", "pip", "pip3", "wheel", "easy_install"];
-    if let Ok(entries) = fs::read_dir(&venv_bin) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if venv_python_names.contains(&name) || name.ends_with(".pyc") {
-                        continue;
-                    }
-
-                    let wrapper = bin_dir.join(name);
-                    let script = format!(
-                        "#!/bin/bash\n# Autogenerated wrapper for python package {}\nexport GITPKG_PACKAGE_ROOT=\"{}\"\nexec \"{}\" \"$@\"\n",
-                        repo,
-                        install_path,
-                        path.display()
-                    );
-                    if let Err(e) = fs::write(&wrapper, script) {
-                        eprintln!("Failed to write wrapper {}: {}", wrapper.display(), e);
-                        continue;
-                    }
-                    if let Ok(meta) = fs::metadata(&wrapper) {
-                        let mut perms = meta.permissions();
-                        perms.set_mode(0o755);
-                        if let Err(e) = fs::set_permissions(&wrapper, perms) {
-                            eprintln!(
-                                "Failed to set permissions on {}: {}",
-                                wrapper.display(),
-                                e
-                            );
-                        }
-                    }
-                    println!("Installed python console script wrapper: {}", name);
-                }
-            }
-        }
-    }
-
-    if !has_pyproject {
-        if let Some((script_name, script_path)) = find_main_python_script(temp_path, repo) {
-            let lib_dir = Path::new(install_path).join("lib").join(repo);
-            if let Err(e) = fs::create_dir_all(&lib_dir) {
-                eprintln!(
-                    "Failed to create lib directory {}: {}",
-                    lib_dir.display(),
-                    e
-                );
-                return Ok(install_status);
-            }
-
-            let dest_script = lib_dir.join(&script_name);
-            if let Err(e) = fs::copy(&script_path, &dest_script) {
-                eprintln!(
-                    "Failed to copy script {} to {}: {}",
-                    script_path.display(),
-                    dest_script.display(),
-                    e
-                );
-                return Ok(install_status);
-            }
-
-            if let Ok(meta) = fs::metadata(&dest_script) {
-                let mut perms = meta.permissions();
-                perms.set_mode(0o755);
-                let _ = fs::set_permissions(&dest_script, perms);
-            }
-
-            if let Ok(content) = fs::read_to_string(&dest_script) {
-                if !content.starts_with("#!") {
-                    let new_content = format!("#!/usr/bin/env python3\n{}", content);
-                    if let Err(e) = fs::write(&dest_script, new_content) {
-                        eprintln!(
-                            "Failed to add shebang to {}: {}",
-                            dest_script.display(),
-                            e
-                        );
-                    }
-                    if let Ok(meta) = fs::metadata(&dest_script) {
-                        let mut perms = meta.permissions();
-                        perms.set_mode(0o755);
-                        let _ = fs::set_permissions(&dest_script, perms);
-                    }
-                }
-            }
-
-            let exe_name = script_name.strip_suffix(".py").unwrap_or(&script_name);
-            let symlink_path = bin_dir.join(exe_name);
-            let _ = fs::remove_file(&symlink_path);
-            if let Err(e) = std::os::unix::fs::symlink(&dest_script, &symlink_path) {
-                eprintln!("Failed to create symlink: {}", e);
-            } else {
-                println!("Created symlink: {} -> {}", exe_name, dest_script.display());
-            }
-        } else if !has_requirements {
-            eprintln!("No python script found (expected main.py, app.py, or <repo>.py)");
-        }
-    }
-
-    Ok(install_status.or(Some(std::process::ExitStatus::from_raw(0))))
-}
-
-fn find_main_python_script(temp: &Path, repo: &str) -> Option<(String, PathBuf)> {
-    let repo_name_path = temp.join(repo);
-    if repo_name_path.is_file() && is_python_file(&repo_name_path) {
-        return Some((repo.to_string(), repo_name_path));
-    }
-
-    let candidates: Vec<String> = vec![
-        "main.py".to_string(),
-        "app.py".to_string(),
-        "cli.py".to_string(),
-        "run.py".to_string(),
-        "start.py".to_string(),
-        "script.py".to_string(),
-        "entrypoint.py".to_string(),
-    ];
-
-    for candidate in &candidates {
-        let path = temp.join(candidate);
-        if path.exists() && path.is_file() && is_python_file(&path) {
-            return Some((candidate.clone(), path));
-        }
-    }
-
-    if let Ok(entries) = fs::read_dir(temp) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_file() && is_python_file(&path) {
-                let name = path
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("script")
-                    .to_string();
-                if name == "setup.py" || name.starts_with("test_") || name.starts_with("_") {
-                    continue;
-                }
-                return Some((name, path));
-            }
-        }
-    }
-
-    if let Ok(entries) = fs::read_dir(temp) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if dir_name.starts_with(".") || dir_name == "__pycache__" || dir_name == "venv" {
-                    continue;
-                }
-                if let Ok(subentries) = fs::read_dir(&path) {
-                    for subentry in subentries.flatten() {
-                        let sub_path = subentry.path();
-                        if sub_path.is_file() && is_python_file(&sub_path) {
-                            let name = sub_path
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .unwrap_or("script")
-                                .to_string();
-                            return Some((name, sub_path));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    None
 }

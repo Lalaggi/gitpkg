@@ -116,12 +116,6 @@ enum Command {
         repo: String,
     },
 
-    /// Alias for versions
-    Version {
-        /// Repository in user/repo format
-        repo: String,
-    },
-
     /// Print path to installed package (or spawn shell with -s)
     Goto {
         /// Repository in user/repo format
@@ -179,7 +173,9 @@ fn run() -> Result<(), GitpkgError> {
         if args.len() >= 3 && args[2] == "--init" {
             config::write_default()?;
         } else {
-            println!("Usage: gitpkg config --init   (write a default ~/.config/gitpkg/config.toml)");
+            println!(
+                "Usage: gitpkg config --init   (write a default ~/.config/gitpkg/config.toml)"
+            );
         }
         return Ok(());
     }
@@ -221,9 +217,7 @@ fn run() -> Result<(), GitpkgError> {
     };
 
     let build_config = match &cli.command {
-        Some(Command::Install {
-            target, flags, ..
-        }) => crate::build::BuildConfig {
+        Some(Command::Install { target, flags, .. }) => crate::build::BuildConfig {
             make_target: target.clone(),
             build_flags: flags.clone(),
             submodules,
@@ -265,13 +259,6 @@ fn run() -> Result<(), GitpkgError> {
             }
         },
         Some(Command::Versions { repo }) => {
-            let target = cli::resolve_self_alias(&repo);
-            commands::versions(&target)?;
-        }
-        Some(Command::Version { repo }) => {
-            eprintln!(
-                "Warning: 'version' is an alias for 'versions'. It is recommended to use 'versions'."
-            );
             let target = cli::resolve_self_alias(&repo);
             commands::versions(&target)?;
         }
@@ -324,13 +311,7 @@ fn run() -> Result<(), GitpkgError> {
                 }
                 Some(t) => {
                     let resolved = cli::resolve_self_alias(t);
-                    commands::migrate(
-                        &resolved,
-                        &dest,
-                        new_username.as_deref(),
-                        verbose,
-                        &cfg,
-                    )?;
+                    commands::migrate(&resolved, &dest, new_username.as_deref(), verbose, &cfg)?;
                 }
             }
         }

@@ -115,10 +115,14 @@ pub fn detect_build_system(path: &str) -> Option<&'static str> {
                 use std::io::Read;
                 if f.read_exact(&mut buf).is_ok() {
                     let head = String::from_utf8_lossy(&buf);
-                    if head.starts_with("#!") && (head.contains("/sh") || head.contains("/bash")
-                        || head.contains("/zsh") || head.contains("/dash")
-                        || head.contains("/ksh") || head.contains("/env bash")
-                        || head.contains("/env sh"))
+                    if head.starts_with("#!")
+                        && (head.contains("/sh")
+                            || head.contains("/bash")
+                            || head.contains("/zsh")
+                            || head.contains("/dash")
+                            || head.contains("/ksh")
+                            || head.contains("/env bash")
+                            || head.contains("/env sh"))
                     {
                         return Some("sh");
                     }
@@ -175,7 +179,7 @@ pub fn detect_js_package_manager(path: &str) -> &'static str {
     "npm"
 }
 
-pub fn build_system_packages(build_system: &str, pm: &str) -> Option<&'static str> {
+pub fn build_system_packages(build_system: &str, pm: &str) -> Option<Vec<&'static str>> {
     let mut map: HashMap<&str, HashMap<&str, &str>> = HashMap::new();
 
     let mut cargo_map = HashMap::new();
@@ -255,5 +259,6 @@ pub fn build_system_packages(build_system: &str, pm: &str) -> Option<&'static st
     }
     map.insert("rake", rake_map);
 
-    map.get(build_system)?.get(pm).copied()
+    let pkgs: &'static str = map.get(build_system)?.get(pm)?;
+    Some(pkgs.split_whitespace().collect())
 }

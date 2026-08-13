@@ -37,7 +37,11 @@ pub fn install_data_files(
             if filename.ends_with(".gresource") {
                 let dest_dir = install_path.join("share").join(repo);
                 if let Err(e) = fs::create_dir_all(&dest_dir) {
-                    eprintln!("Failed to create resource dir {}: {}", dest_dir.display(), e);
+                    eprintln!(
+                        "Failed to create resource dir {}: {}",
+                        dest_dir.display(),
+                        e
+                    );
                     continue;
                 }
                 let dest = dest_dir.join(filename);
@@ -105,11 +109,15 @@ pub fn install_data_files(
             if filename.ends_with(".gresource") {
                 let dest_dir = install_path.join("share").join(repo);
                 if let Err(e) = fs::create_dir_all(&dest_dir) {
-                    eprintln!("Failed to create built resource dir {}: {}", dest_dir.display(), e);
+                    eprintln!(
+                        "Failed to create built resource dir {}: {}",
+                        dest_dir.display(),
+                        e
+                    );
                     continue;
                 }
                 let dest = dest_dir.join(filename);
-                if let Ok(_) = fs::copy(&path, &dest) {
+                if fs::copy(&path, &dest).is_ok() {
                     println!("Installed built resource: {}", dest.display());
                     installed.push((path, dest));
                 }
@@ -307,10 +315,7 @@ pub fn create_data_symlinks(install_path: &Path, repo: &str, system_wide: bool) 
                                 {
                                     println!("Installed system icon: {}", sub_dest.display());
                                 } else {
-                                    eprintln!(
-                                        "Failed to copy system icon: {}",
-                                        sub_dest.display()
-                                    );
+                                    eprintln!("Failed to copy system icon: {}", sub_dest.display());
                                 }
                             }
                         }

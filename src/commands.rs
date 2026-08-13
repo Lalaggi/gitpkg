@@ -5,32 +5,31 @@ use std::path::Path;
 use std::process::Command;
 
 use crate::build::{
-    build_cargo, build_cmake, build_electron, build_go, build_gradle, build_just,
-    build_make, build_mason, build_meson, build_nodejs, build_ninja, build_python, build_rake,
-    build_shell, find_installed_executable, BuildConfig,
+    build_cargo, build_cmake, build_electron, build_go, build_gradle, build_just, build_make,
+    build_mason, build_meson, build_ninja, build_nodejs, build_python, build_rake, build_shell,
+    find_installed_executable, BuildConfig,
 };
 use crate::cli::{
     build_git_url_with, detect_package_manager, get_remote_url, install_system_package,
-    is_installed, remove_system_package,
+    install_system_packages, is_installed, is_protected_package, remove_system_packages,
 };
 use crate::data::{
-    create_data_symlinks, create_desktop_symlinks, install_data_files,
-    refresh_desktop_database,
+    create_data_symlinks, create_desktop_symlinks, install_data_files, refresh_desktop_database,
 };
 use crate::detect::{build_system_packages, detect_build_system};
 use crate::error::GitpkgError;
 use crate::git::{
-    check_branch_exists, get_commit_hash, get_remote_commit_hash,
-    run_git_clone_with_progress,
+    check_branch_exists, get_commit_hash, get_remote_commit_hash, run_git_clone_with_progress,
 };
 use crate::package::{
-    find_matching_packages, find_package_by_key, home_dir, home_dir_or_err,
-    install_root, parse_pkg, prompt_package_selection,
-    read_info_file, read_package_list, remove_from_package_list, resolve_package,
-    temp_path, write_info as write_info_file,
+    find_matching_packages, find_package_by_key, home_dir, home_dir_or_err, install_root,
+    parse_pkg, prompt_package_selection, read_info_file, read_package_list,
+    remove_from_package_list, resolve_package, temp_path, validate_pkg_names,
+    write_info as write_info_file,
 };
 use crate::util::{dir_size_bytes, format_mb};
 
+#[allow(clippy::too_many_arguments)]
 pub fn install(
     package: &str,
     verbose: bool,
@@ -42,6 +41,7 @@ pub fn install(
     system_wide: bool,
 ) -> Result<(), GitpkgError> {
     let (user, repo) = parse_pkg(package);
+    validate_pkg_names(&user, &repo)?;
     let url = build_git_url_with(&user, &repo, supplier, ssh, None);
     let supplier_domain = supplier.unwrap_or("github.com");
 
@@ -100,16 +100,22 @@ pub fn install(
         })
     };
 
-    if let Some(comp) = compiler {
-        let check_bin = if bs == "pnpm" || bs == "yarn" || bs == "electron" { "node" } else { bs };
+    if let Some(packages) = compiler {
+        let check_bin = if bs == "pnpm" || bs == "yarn" || bs == "electron" {
+            "node"
+        } else {
+            bs
+        };
         if !is_installed(check_bin) {
-            println!("Installing {} for {} via {}...", comp, bs, pm);
-            if !install_system_package(pm, comp) {
+            println!("Installing {:?} for {} via {}...", packages, bs, pm);
+            if !install_system_packages(pm, &packages) {
                 let _ = fs::remove_dir_all(&path);
-                eprintln!("Failed installing {}", comp);
+                eprintln!("Failed installing {:?}", packages);
                 return Ok(());
             }
-            installed_deps.push(comp.to_string());
+            for pkg in packages {
+                installed_deps.push(pkg.to_string());
+            }
         }
     }
 
@@ -128,6 +134,7 @@ pub fn install(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build(
     user: &str,
     repo: &str,
@@ -140,6 +147,12 @@ pub fn build(
     installed_deps: &[String],
     remote_url: Option<&str>,
 ) -> Result<bool, GitpkgError> {
+    println!(
+        "WARNING: gitpkg clones arbitrary repositories and runs their build scripts \
+         (make, cargo, npm, gradle, shell, etc.) as your user — equivalent to 'curl | sh' \
+         with a build step. Only install repositories you trust."
+    );
+
     let temp = temp_path(user, repo)?;
     let commit = get_commit_hash(&temp).unwrap_or_else(|| "unknown".to_string());
     let supplier_domain = supplier.unwrap_or("github.com");
@@ -167,7 +180,13 @@ pub fn build(
         "go" => build_go(&temp, &install_path, repo, verbose)?,
         "npm" | "pnpm" | "yarn" => build_nodejs(&temp, &install_path, repo, verbose, bs)?,
         "electron" => build_electron(&temp, &install_path, repo, verbose)?,
-        "gradle" => build_gradle(&temp, &install_path, repo, verbose, config.java_home.as_deref())?,
+        "gradle" => build_gradle(
+            &temp,
+            &install_path,
+            repo,
+            verbose,
+            config.java_home.as_deref(),
+        )?,
         "sh" => build_shell(&temp, &install_path, repo, verbose)?,
         "just" => build_just(&temp, &install_path, repo, verbose, config)?,
         "rake" => build_rake(&temp, &install_path, repo, verbose)?,
@@ -209,19 +228,12 @@ pub fn build(
                     let _ = fs::create_dir_all(&dest_dir);
                     match fs::copy(&completion_src, &dest) {
                         Ok(_) => {
-                            println!("Installed updated completion script to {}", dest.display());
-                            let bashrc = home.join(".bashrc");
-                            let source_line =
-                                "source $HOME/.local/share/gitpkg/gitpkg-completion.sh";
-                            if let Ok(content) = fs::read_to_string(&bashrc) {
-                                if !content.contains(source_line) {
-                                    let new_content = format!(
-                                        "{}\n# gitpkg completion\n{}\n",
-                                        content, source_line
-                                    );
-                                    let _ = fs::write(&bashrc, new_content);
-                                }
-                            }
+                            println!("Installed completion script to {}", dest.display());
+                            println!(
+                                "To enable shell completion, add this to your shell rc \
+                                 (e.g. ~/.bashrc or ~/.zshrc):"
+                            );
+                            println!("  source $HOME/.local/share/gitpkg/gitpkg-completion.sh");
                         }
                         Err(e) => eprintln!("Failed to install completion script: {}", e),
                     }
@@ -291,7 +303,11 @@ pub fn build(
                     };
 
                     if ok {
-                        println!("Created symlink: {} -> {}", target.display(), exe_path.display());
+                        println!(
+                            "Created symlink: {} -> {}",
+                            target.display(),
+                            exe_path.display()
+                        );
                         if !is_system {
                             println!("Note: Make sure ~/.local/bin is in your PATH");
                             println!("Add this to your ~/.bashrc or ~/.zshrc:");
@@ -460,8 +476,24 @@ exec {} "$@"
     }
 }
 
+/// Remove a file, falling back to the superuser provider when `system_wide`
+/// (root-owned files under e.g. `/usr/share` were installed via `run_as` and
+/// can't be removed by a plain `fs::remove_file`).
+fn remove_file_privileged(path: &str, system_wide: bool) -> bool {
+    if fs::remove_file(path).is_ok() {
+        return true;
+    }
+    if system_wide {
+        if let Some(status) = crate::cli::run_as(&["rm", "-f", path]) {
+            return status.success();
+        }
+    }
+    false
+}
+
 pub fn remove(package: &str, remove_deps: bool) -> Result<(), GitpkgError> {
     let (user, repo) = parse_pkg(package);
+    validate_pkg_names(&user, &repo)?;
 
     let matches = find_matching_packages(&user, &repo);
 
@@ -509,8 +541,20 @@ pub fn remove(package: &str, remove_deps: bool) -> Result<(), GitpkgError> {
 
     if remove_deps {
         for dep_name in &info.system_deps {
+            // Legacy installs may store a space-separated list as one entry;
+            // split it so each package is evaluated and removed individually.
+            let tokens: Vec<&str> = dep_name.split_whitespace().collect();
+            if tokens.iter().any(|t| is_protected_package(t)) {
+                eprintln!(
+                    "WARNING: refusing to remove protected system dependency '{}'. \
+                     Skipping (this is a core toolchain/interpreter and removing it \
+                     could break your system).",
+                    dep_name
+                );
+                continue;
+            }
             println!("Removing system dependency: {}", dep_name);
-            if !remove_system_package(&info.package_manager, dep_name) {
+            if !remove_system_packages(&info.package_manager, &tokens) {
                 eprintln!("WARNING: failed to remove system dependency {}", dep_name);
             }
         }
@@ -535,9 +579,10 @@ pub fn remove(package: &str, remove_deps: bool) -> Result<(), GitpkgError> {
     for path_str in &info.data_symlinks {
         let p = Path::new(path_str);
         if p.exists() {
-            match fs::remove_file(p) {
-                Ok(_) => println!("Removed data symlink: {}", p.display()),
-                Err(e) => eprintln!("Failed to remove data symlink {}: {}", p.display(), e),
+            if remove_file_privileged(path_str, info.system_wide) {
+                println!("Removed data symlink: {}", p.display());
+            } else {
+                eprintln!("Failed to remove data symlink {}", p.display());
             }
         }
     }
@@ -545,11 +590,10 @@ pub fn remove(package: &str, remove_deps: bool) -> Result<(), GitpkgError> {
     for path_str in &info.desktop_symlinks {
         let p = Path::new(path_str);
         if p.exists() {
-            match fs::remove_file(p) {
-                Ok(_) => println!("Removed desktop symlink: {}", p.display()),
-                Err(e) => {
-                    eprintln!("Failed to remove desktop symlink {}: {}", p.display(), e)
-                }
+            if remove_file_privileged(path_str, info.system_wide) {
+                println!("Removed desktop symlink: {}", p.display());
+            } else {
+                eprintln!("Failed to remove desktop symlink {}", p.display());
             }
         }
     }
@@ -831,6 +875,8 @@ pub fn versions(package: &str) -> Result<(), GitpkgError> {
 }
 
 pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(), GitpkgError> {
+    let (v_user, v_repo) = parse_pkg(package);
+    validate_pkg_names(&v_user, &v_repo)?;
     let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/')
     {
         match find_package_by_key(package) {
@@ -848,7 +894,8 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(
         let matches = find_matching_packages(&user, &repo);
 
         if !matches.is_empty() {
-            let (_pkg_key, stored_supplier, info_path) = if matches.len() > 1 && supplier.is_none() {
+            let (_pkg_key, stored_supplier, info_path) = if matches.len() > 1 && supplier.is_none()
+            {
                 match prompt_package_selection(&matches) {
                     Some(idx) => matches[idx].clone(),
                     None => {
@@ -879,7 +926,12 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(
             }
             println!("Found package under old Codeberg account, migrating...");
             let (_pkg_key, stored_supplier, info_path) = old_matches[0].clone();
-            ("el1lovescomputers".to_string(), "gitpkg".to_string(), stored_supplier, info_path)
+            (
+                "el1lovescomputers".to_string(),
+                "gitpkg".to_string(),
+                stored_supplier,
+                info_path,
+            )
         } else {
             return Err(GitpkgError::PackageNotFound(format!("{}/{}", user, repo)));
         }
@@ -898,10 +950,14 @@ pub fn upgrade(package: &str, verbose: bool, supplier: Option<&str>) -> Result<(
 
     // Migrate gitpkg itself from Codeberg to GitHub
     let mut migrated = false;
-    if user == "el1lovescomputers" && repo == "gitpkg" && supplier.is_none()
+    if user == "el1lovescomputers"
+        && repo == "gitpkg"
+        && supplier.is_none()
         && stored_supplier == "codeberg.org"
     {
-        println!("Migrating gitpkg source from Codeberg (el1lovescomputers) to GitHub (Lalaggi)...");
+        println!(
+            "Migrating gitpkg source from Codeberg (el1lovescomputers) to GitHub (Lalaggi)..."
+        );
         supplier_to_use = "github.com";
         stored_remote = None;
         migrated = true;
@@ -1027,6 +1083,8 @@ pub fn migrate(
     _verbose: bool,
     cfg: &crate::config::Config,
 ) -> Result<(), GitpkgError> {
+    let (v_user, v_repo) = parse_pkg(package);
+    validate_pkg_names(&v_user, &v_repo)?;
     let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/')
     {
         match find_package_by_key(package) {
@@ -1072,10 +1130,7 @@ pub fn migrate(
     } else if let Some(name) = cfg.forge_usernames.get(&stored_supplier) {
         name.clone()
     } else {
-        print!(
-            "Enter your username on {}: ",
-            destination_supplier
-        );
+        print!("Enter your username on {}: ", destination_supplier);
         let _ = std::io::stdout().flush();
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
@@ -1091,11 +1146,17 @@ pub fn migrate(
 
     // Rewrite remote URL
     let old_remote = info.remote_url.as_deref().unwrap_or("");
-    let new_remote = rewrite_remote_url(old_remote, destination_supplier, &resolved_new_username, &repo);
+    let new_remote = rewrite_remote_url(
+        old_remote,
+        destination_supplier,
+        &resolved_new_username,
+        &repo,
+    );
 
     // Update info fields
     let old_key = crate::package::get_package_key(&user, &repo, &stored_supplier);
-    let new_pkg_key = crate::package::get_package_key(&resolved_new_username, &repo, destination_supplier);
+    let new_pkg_key =
+        crate::package::get_package_key(&resolved_new_username, &repo, destination_supplier);
     let old_install_path = info.install_path.clone();
     let old_symlink_path = info.symlink_path.clone();
 
@@ -1103,29 +1164,49 @@ pub fn migrate(
     info.user = resolved_new_username.clone();
     info.remote_url = Some(new_remote);
 
-    // Update install_path with new package key
-    info.install_path = old_install_path.replace(&old_key, &new_pkg_key);
+    // Rebuild install_path from structured components (home + new pkg_key +
+    // the existing commit directory) instead of a blind substring replace,
+    // which would corrupt any path containing old_key as a substring.
+    let commit = Path::new(&old_install_path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    info.install_path = install_root(&resolved_new_username, &repo, &commit, destination_supplier)?;
 
-    // Update symlink_path with new install_path
-    info.symlink_path = old_symlink_path.replace(&old_key, &new_pkg_key);
+    // For symlink_path, only swap a path *segment* equal to old_key (this is a
+    // no-op for typical /usr/bin or ~/.local/bin symlinks, which never contain
+    // the pkg_key). Avoids the substring-replace corruption above.
+    info.symlink_path = old_symlink_path
+        .split('/')
+        .map(|seg| {
+            if seg == old_key {
+                new_pkg_key.as_str()
+            } else {
+                seg
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
 
     // Write updated info file
-    let new_toml = toml::to_string_pretty(&info).map_err(|e| {
-        GitpkgError::Parse(format!("Failed to serialize info: {}", e))
-    })?;
+    let new_toml = toml::to_string_pretty(&info)
+        .map_err(|e| GitpkgError::Parse(format!("Failed to serialize info: {}", e)))?;
     fs::write(&info_path, &new_toml)?;
 
     // Update package list: add new entry, remove old
-    let new_pkg_key = crate::package::get_package_key(&resolved_new_username, &repo, destination_supplier);
-    crate::package::add_to_package_list(&resolved_new_username, &repo, &info_path, destination_supplier)?;
+    let new_pkg_key =
+        crate::package::get_package_key(&resolved_new_username, &repo, destination_supplier);
+    crate::package::add_to_package_list(
+        &resolved_new_username,
+        &repo,
+        &info_path,
+        destination_supplier,
+    )?;
     crate::package::remove_old_supplier_entry(&user, &repo, &stored_supplier);
 
     let old_key = crate::package::get_package_key(&user, &repo, &stored_supplier);
     println!("Migrated {} -> {}", old_key, new_pkg_key);
-    println!(
-        "Source: {} -> {}",
-        stored_supplier, destination_supplier
-    );
+    println!("Source: {} -> {}", stored_supplier, destination_supplier);
 
     Ok(())
 }
@@ -1207,6 +1288,8 @@ pub fn change_branch(
     verbose: bool,
     cli_supplier: Option<&str>,
 ) -> Result<(), GitpkgError> {
+    let (v_user, v_repo) = parse_pkg(package);
+    validate_pkg_names(&v_user, &v_repo)?;
     let (user, repo, stored_supplier, info_path) = if package.contains('_') && package.contains('/')
     {
         match find_package_by_key(package) {
@@ -1305,7 +1388,13 @@ pub fn change_branch(
         fs::remove_dir_all(&path)?;
     }
     println!("Cloning '{}'...", new_branch);
-    if !run_git_clone_with_progress(&url, &path, verbose, Some(new_branch), build_config.submodules) {
+    if !run_git_clone_with_progress(
+        &url,
+        &path,
+        verbose,
+        Some(new_branch),
+        build_config.submodules,
+    ) {
         return Err(GitpkgError::CloneFailed);
     }
 
@@ -1329,6 +1418,9 @@ pub fn change_branch(
         )));
     }
 
-    println!("Successfully switched {} to branch '{}'", pkg_key, new_branch);
+    println!(
+        "Successfully switched {} to branch '{}'",
+        pkg_key, new_branch
+    );
     Ok(())
 }

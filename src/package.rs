@@ -8,6 +8,30 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::GitpkgError;
 
+/// Validate a `user`/`repo` pair parsed from a package argument.
+///
+/// Rejects empty names and any path-like input (`.`, `..`, `/`, `\`, or `..`
+/// segments) that could escape the managed `~/.local/share/gitpkg` tree via
+/// `install_root`/`get_package_key`. Without this, `../x` would resolve into a
+/// sibling directory of the gitpkg root.
+pub fn validate_pkg_names(user: &str, repo: &str) -> Result<(), GitpkgError> {
+    for (label, part) in [("user", user), ("repo", repo)] {
+        if part.is_empty() {
+            return Err(GitpkgError::InvalidPackageName(format!(
+                "{} is empty",
+                label
+            )));
+        }
+        if part == "." || part == ".." || part.contains("..") {
+            return Err(GitpkgError::InvalidPackageName(part.to_string()));
+        }
+        if part.contains('/') || part.contains('\\') {
+            return Err(GitpkgError::InvalidPackageName(part.to_string()));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the user's home directory without panicking.
 /// Returns `None` (instead of crashing) when HOME is unset, so callers can
 /// report a clear error rather than a cryptic `.unwrap()` panic under e.g.
@@ -75,7 +99,9 @@ pub fn get_package_key(user: &str, repo: &str, supplier: &str) -> String {
 
 pub fn list_file_path() -> Result<String, GitpkgError> {
     let h = home_dir_or_err()?;
-    Ok(h.join(".local/share/gitpkg/list.gitpkg").to_string_lossy().into_owned())
+    Ok(h.join(".local/share/gitpkg/list.gitpkg")
+        .to_string_lossy()
+        .into_owned())
 }
 
 pub fn read_package_list() -> HashMap<String, String> {
@@ -152,7 +178,7 @@ pub fn find_matching_packages(user: &str, repo: &str) -> Vec<(String, String, St
             let pkg_user_part = parts[0];
 
             let pkg_user = if pkg_user_part.contains('_') {
-                pkg_user_part.split('_').last().unwrap_or("")
+                pkg_user_part.split('_').next_back().unwrap_or("")
             } else {
                 pkg_user_part
             };
@@ -215,6 +241,7 @@ pub fn prompt_package_selection(matches: &[(String, String, String)]) -> Option<
 /// selection when multiple packages match.
 pub fn resolve_package(package: &str) -> Result<(String, String, String), GitpkgError> {
     let (user, repo, supplier_hint) = parse_pkg_with_supplier(package);
+    validate_pkg_names(&user, &repo)?;
 
     let exact_match = find_package_by_key(package);
 
@@ -305,14 +332,13 @@ pub struct PackageInfo {
 }
 
 pub fn read_info_file(info_path: &str) -> Result<PackageInfo, GitpkgError> {
-    let content = fs::read_to_string(info_path).map_err(|e| {
-        GitpkgError::Parse(format!("Failed to read info file: {}", e))
-    })?;
-    toml::from_str(&content).map_err(|e| {
-        GitpkgError::Parse(format!("Failed to parse info file: {}", e))
-    })
+    let content = fs::read_to_string(info_path)
+        .map_err(|e| GitpkgError::Parse(format!("Failed to read info file: {}", e)))?;
+    toml::from_str(&content)
+        .map_err(|e| GitpkgError::Parse(format!("Failed to parse info file: {}", e)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_info(
     user: &str,
     repo: &str,
@@ -358,9 +384,7 @@ pub fn write_info(
         has_data_files,
         system_wide,
         system_deps: installed_deps.to_vec(),
-        remote_url: remote_url
-            .filter(|r| !r.is_empty())
-            .map(|r| r.to_string()),
+        remote_url: remote_url.filter(|r| !r.is_empty()).map(|r| r.to_string()),
         branch: branch.map(|b| b.to_string()),
         make_target: make_target.map(|t| t.to_string()),
         build_flags: build_flags.map(|f| f.to_string()),
@@ -490,7 +514,10 @@ remote_url = "git@github.com:alice/myrepo.git"
         assert_eq!(info.build_flags.as_deref(), Some("-j4"));
         assert!(info.submodules);
         assert_eq!(info.system_deps, vec!["gcc", "make"]);
-        assert_eq!(info.remote_url.as_deref(), Some("git@github.com:alice/myrepo.git"));
+        assert_eq!(
+            info.remote_url.as_deref(),
+            Some("git@github.com:alice/myrepo.git")
+        );
     }
 
     #[test]
@@ -525,5 +552,23 @@ remote_url = "git@github.com:alice/myrepo.git"
         assert_eq!(original.latest_commit, deserialized.latest_commit);
         assert_eq!(original.build_system, deserialized.build_system);
         assert_eq!(original.supplier, deserialized.supplier);
+    }
+
+    #[test]
+    fn test_validate_pkg_names_accepts_normal() {
+        assert!(validate_pkg_names("alice", "myrepo").is_ok());
+        assert!(validate_pkg_names("codeberg_alice", "my-repo").is_ok());
+    }
+
+    #[test]
+    fn test_validate_pkg_names_rejects_traversal() {
+        assert!(validate_pkg_names("..", "x").is_err());
+        assert!(validate_pkg_names("a", "..").is_err());
+        assert!(validate_pkg_names("a..b", "x").is_err());
+        assert!(validate_pkg_names("a/b", "x").is_err());
+        assert!(validate_pkg_names("a", "b\\c").is_err());
+        assert!(validate_pkg_names("", "x").is_err());
+        assert!(validate_pkg_names("a", "").is_err());
+        assert!(validate_pkg_names(".", "x").is_err());
     }
 }

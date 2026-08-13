@@ -113,7 +113,6 @@ pub fn superuser_auth() -> bool {
     superuser().auth()
 }
 
-
 pub fn resolve_self_alias(arg: &str) -> String {
     if arg == "self" {
         "Lalaggi/gitpkg".to_string()
@@ -230,6 +229,33 @@ pub fn detect_package_manager() -> Option<&'static str> {
         .copied()
 }
 
+/// Install several system packages, one `install_system_package` call each.
+/// Returns `true` only if every package installed (or was already present).
+/// This fixes auto-install for package managers whose toolchain mapping is a
+/// space-separated list (e.g. `"gcc gcc-c++ make"` on dnf/yum/zypper), which a
+/// single-argument call would pass as one bogus package name.
+pub fn install_system_packages(pm: &str, packages: &[&str]) -> bool {
+    let mut ok = true;
+    for pkg in packages {
+        if !install_system_package(pm, pkg) {
+            ok = false;
+        }
+    }
+    ok
+}
+
+/// Remove several system packages, one `remove_system_package` call each.
+/// Returns `true` only if every removal succeeded.
+pub fn remove_system_packages(pm: &str, packages: &[&str]) -> bool {
+    let mut ok = true;
+    for pkg in packages {
+        if !remove_system_package(pm, pkg) {
+            ok = false;
+        }
+    }
+    ok
+}
+
 pub fn install_system_package(pm: &str, package_name: &str) -> bool {
     let pm_args: Vec<&str> = match pm {
         "apt" => vec!["apt", "install", "-y", package_name],
@@ -277,5 +303,78 @@ pub fn remove_system_package(pm: &str, package_name: &str) -> bool {
             eprintln!("Failed to remove {}: {}", package_name, e);
             false
         }
+    }
+}
+
+/// Core build toolchains and interpreters that `--remove-deps` must never
+/// uninstall. Removing e.g. `python3` or `build-essential` can break a running
+/// system, so any dep matching (or containing) one of these is skipped.
+pub fn is_protected_package(name: &str) -> bool {
+    const PROTECTED: &[&str] = &[
+        "python3",
+        "python",
+        "python2",
+        "pip",
+        "pip3",
+        "virtualenv",
+        "venv",
+        "build-essential",
+        "base-devel",
+        "build-base",
+        "gcc",
+        "gcc-c++",
+        "g++",
+        "make",
+        "cmake",
+        "ninja",
+        "meson",
+        "mason",
+        "golang",
+        "go",
+        "rustc",
+        "cargo",
+        "rust",
+        "nodejs",
+        "npm",
+        "node",
+        "yarn",
+        "pnpm",
+        "ruby",
+        "rubygems",
+        "just",
+        "gradle",
+        "rake",
+    ];
+    let lower = name.trim().to_ascii_lowercase();
+    PROTECTED.contains(&lower.as_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_protected_package_core_toolchains() {
+        assert!(is_protected_package("python3"));
+        assert!(is_protected_package("build-essential"));
+        assert!(is_protected_package("base-devel"));
+        assert!(is_protected_package("gcc-c++"));
+        assert!(is_protected_package("golang"));
+        assert!(is_protected_package("nodejs"));
+        assert!(is_protected_package("ruby"));
+        assert!(is_protected_package("just"));
+    }
+
+    #[test]
+    fn test_is_protected_package_whitespace_and_case() {
+        assert!(is_protected_package("  Python3 "));
+        assert!(is_protected_package("BUILD-ESSENTIAL"));
+    }
+
+    #[test]
+    fn test_is_protected_package_allows_normal() {
+        assert!(!is_protected_package("ripgrep"));
+        assert!(!is_protected_package("libgtk-3-dev"));
+        assert!(!is_protected_package("fd-find"));
     }
 }

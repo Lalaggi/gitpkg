@@ -53,11 +53,9 @@ if [ -f "$COMPLETION_SRC" ]; then
   mkdir -p "$DEST_DIR"
   cp "$COMPLETION_SRC" "$DEST_DIR/gitpkg-completion.sh"
   chmod +x "$DEST_DIR/gitpkg-completion.sh"
-  # Add source line to ~/.bashrc if not already present
-  if ! grep -Fq "source \$HOME/.local/share/gitpkg/gitpkg-completion.sh" "$HOME/.bashrc" 2>/dev/null; then
-    echo "source \$HOME/.local/share/gitpkg/gitpkg-completion.sh" >> "$HOME/.bashrc"
-    echo "Appended completion source to ~/.bashrc"
-  fi
+  echo "Installed completion script to $DEST_DIR/gitpkg-completion.sh"
+  echo "To enable shell completion, add this to your shell rc (e.g. ~/.bashrc or ~/.zshrc):"
+  echo "  source \$HOME/.local/share/gitpkg/gitpkg-completion.sh"
 fi
 
 # 6. Cleanup

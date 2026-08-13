@@ -11,6 +11,7 @@ pub enum GitpkgError {
     Parse(String),
     #[allow(dead_code)]
     PackageManagerNotFound,
+    InvalidPackageName(String),
     Cancelled,
 }
 
@@ -25,6 +26,9 @@ impl fmt::Display for GitpkgError {
             GitpkgError::Git(msg) => write!(f, "Git error: {}", msg),
             GitpkgError::Parse(msg) => write!(f, "{}", msg),
             GitpkgError::PackageManagerNotFound => write!(f, "No package manager detected"),
+            GitpkgError::InvalidPackageName(pkg) => {
+                write!(f, "Invalid package name '{}': use the form user/repo with no path separators or '.'/'..' segments", pkg)
+            }
             GitpkgError::Cancelled => write!(f, "Operation cancelled"),
         }
     }
