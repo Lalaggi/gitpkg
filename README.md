@@ -45,7 +45,7 @@ Copies included .desktop files into `~/.local/share/applications/`
 
 ### Automatic:
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Lalaggi/gitpkg/main/install.sh" | sh
+curl -fsSL "https://raw.githubusercontent.com/Lalaggi/gitpkg/main/install.sh" | sh # it is ALWAYS recommended to read install scripts and validate they are not doing anything malicious. you are fully capable, and highly recommended to read this install script
 ```
 ### Manual:
 ```bash
