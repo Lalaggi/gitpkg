@@ -280,4 +280,5 @@ Without conflict, gitpkg will assume `<user>/<repo> = <supplier>_<user>/<repo>` 
 
 
 # License
-This Project uses the GNU GENERAL PUBLIC LICENSE - Version 3
+This project is licensed under the GNU General Public License v3.0 or later
+(GPL-3.0-or-later). See [LICENSE](LICENSE) for details.
